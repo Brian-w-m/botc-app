@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { findRoomPlayer, getPlayerSessionHash, logSupabaseError } from "@/lib/rooms/session";
+import { publishRoomVersion } from "@/lib/rooms/realtime";
 
 const readySchema = z.object({ ready: z.boolean() });
 
@@ -29,7 +30,7 @@ export async function PATCH(
     return NextResponse.json({ error: "Could not update your status." }, { status: 500 });
   }
   if (!room) return NextResponse.json({ error: "This room no longer exists." }, { status: 404 });
-  if (room.status !== "lobby") return NextResponse.json({ error: "Ready status is locked after the game starts." }, { status: 409 });
+  if (room.status !== "lobby" && room.status !== "finished") return NextResponse.json({ error: "Ready status is locked while a game is running." }, { status: 409 });
 
   const { data: player, error: sessionError } = await findRoomPlayer(supabase, room.id, sessionHash);
   if (sessionError) {
@@ -44,5 +45,6 @@ export async function PATCH(
     logSupabaseError("Ready status update failed", error);
     return NextResponse.json({ error: "Could not update your ready status." }, { status: 500 });
   }
+  await publishRoomVersion(supabase, room.id, Date.now());
   return NextResponse.json({ ready: parsed.data.ready });
 }

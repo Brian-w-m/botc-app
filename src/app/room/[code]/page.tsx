@@ -2,20 +2,35 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { ArrowLeft, Check, Clipboard, LoaderCircle, MoonStar, RefreshCw, UsersRound } from "lucide-react";
+import { ArrowLeft, Bot, Check, Clipboard, LoaderCircle, LogOut, MoonStar, Plus, RefreshCw, UsersRound, X } from "lucide-react";
 import JoinRoomForm from "@/components/JoinRoomForm";
+import { getBrowserSupabaseClient } from "@/lib/supabase/browser";
 
 type LobbyPlayer = {
   id: string;
   display_name: string;
   is_host: boolean;
   is_ready: boolean;
+  is_bot: boolean;
 };
 
 type Lobby = {
-  room: { code: string; status: string };
+  room: { id: string; code: string; status: string };
   players: LobbyPlayer[];
   currentPlayerId: string;
+  rulesetAvailable: boolean;
+  rulesetPlayerRange: { min: number; max: number } | null;
+  game: { id: string; phase: string; dayNumber: number; version: number } | null;
+  gameHistory: Array<{
+    id: number;
+    gameNumber: number;
+    rulesetId: string;
+    rulesetVersion: string;
+    dayNumber: number;
+    winner: string | null;
+    finishedAt: string;
+    publicState: { revealedRoles?: Array<{ playerId: string; displayName: string; roleName: string; team: string }> };
+  }>;
 };
 
 export default function RoomPage({ params }: { params: Promise<{ code: string }> }) {
@@ -26,6 +41,9 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [readyBusy, setReadyBusy] = useState(false);
+  const [leaveBusy, setLeaveBusy] = useState(false);
+  const [startBusy, setStartBusy] = useState(false);
+  const [botBusy, setBotBusy] = useState(false);
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
@@ -66,6 +84,20 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
     return () => window.clearInterval(timer);
   }, [refresh, token]);
 
+  useEffect(() => {
+    const roomId = lobby?.room.id;
+    const client = getBrowserSupabaseClient();
+    if (!roomId || !client || !token) return;
+
+    const channel = client.channel(`room:${roomId}`, {
+      config: { broadcast: { self: false } }
+    }).on("broadcast", { event: "room_state_changed" }, () => {
+      void refresh();
+    }).subscribe();
+
+    return () => { void client.removeChannel(channel); };
+  }, [lobby?.room.id, refresh, token]);
+
   async function toggleReady() {
     const current = lobby?.players.find(player => player.id === lobby.currentPlayerId);
     if (!current) return;
@@ -97,6 +129,66 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
     }
   }
 
+  async function leaveRoom() {
+    setLeaveBusy(true);
+    setError("");
+    try {
+      const response = await fetch(`/api/rooms/${code}/session`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error ?? "Unable to leave the room.");
+      window.sessionStorage.removeItem(`nightfall:session:${code}`);
+      setToken("");
+      setLobby(null);
+      setLoading(false);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Unable to leave the room.");
+    } finally {
+      setLeaveBusy(false);
+    }
+  }
+
+  async function startGame() {
+    setStartBusy(true);
+    setError("");
+    try {
+      const endpoint = lobby?.game?.phase === "finished" ? "restart" : "start";
+      const response = await fetch(`/api/rooms/${code}/game/${endpoint}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ commandId: crypto.randomUUID() })
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error ?? "Unable to start the game.");
+      window.location.assign(`/room/${code}/play`);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Unable to start the game.");
+    } finally {
+      setStartBusy(false);
+    }
+  }
+
+  async function manageBot(operation: "add" | "remove", botPlayerId?: string) {
+    setBotBusy(true);
+    setError("");
+    try {
+      const response = await fetch(`/api/rooms/${code}/bots`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify(operation === "add" ? { operation } : { operation, botPlayerId })
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error ?? "Unable to update bot seats.");
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Unable to update bot seats.");
+    } finally {
+      setBotBusy(false);
+    }
+  }
+
   const me = lobby?.players.find(player => player.id === lobby.currentPlayerId);
   const readyCount = lobby?.players.filter(player => player.is_ready).length ?? 0;
 
@@ -125,8 +217,14 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
                 <p className="text-xs font-medium tracking-[0.22em] text-violet-200">THE LANTERN ROOM</p>
                 <h1 className="mt-2 text-3xl font-semibold sm:text-4xl">Gather around</h1>
               </div>
-              <div className="flex items-center gap-2 rounded-full border border-emerald-300/15 bg-emerald-300/[0.06] px-3 py-2 text-xs text-emerald-200">
-                <span className="size-1.5 animate-pulse rounded-full bg-emerald-300" /> Lobby · Live
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2 rounded-full border border-emerald-300/15 bg-emerald-300/[0.06] px-3 py-2 text-xs text-emerald-200">
+                  <span className={`size-1.5 rounded-full ${lobby.game?.phase === "finished" ? "bg-amber-200" : "animate-pulse bg-emerald-300"}`} /> {lobby.game?.phase === "finished" ? "Game finished · Lobby open" : lobby.game ? "Game in progress" : "Lobby · Live"}
+                </div>
+                <button onClick={() => void leaveRoom()} disabled={leaveBusy} className="flex items-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-xs text-zinc-500 transition hover:text-white disabled:opacity-50" aria-label="Leave room">
+                  {leaveBusy ? <LoaderCircle className="animate-spin" size={14} /> : <LogOut size={14} />}
+                  Leave
+                </button>
               </div>
             </header>
 
@@ -145,6 +243,28 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
                     <div className="h-full rounded-full bg-emerald-300 transition-all duration-500" style={{ width: `${lobby.players.length ? readyCount / lobby.players.length * 100 : 0}%` }} />
                   </div>
                 </div>
+                {me?.is_host && (!lobby.game || lobby.game.phase === "finished") && (
+                  <div className="mt-5">
+                    <button
+                      onClick={() => void startGame()}
+                      disabled={startBusy || !lobby.rulesetAvailable || !lobby.rulesetPlayerRange || lobby.players.length < (lobby.rulesetPlayerRange?.min ?? Infinity) || lobby.players.length > (lobby.rulesetPlayerRange?.max ?? -Infinity)}
+                      className="flex w-full items-center justify-center gap-2 rounded-xl bg-violet-300 px-4 py-3 font-semibold text-zinc-950 transition hover:bg-violet-200 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      {startBusy && <LoaderCircle className="animate-spin" size={16} />}
+                      {lobby.game?.phase === "finished" ? "Start a new game" : "Start game"}
+                    </button>
+                    <p className="mt-2 text-xs leading-5 text-zinc-600">
+                      {lobby.game?.phase === "finished" ? "Use this same group, and add or remove players and bots below before starting." : !lobby.rulesetAvailable ? "The Trouble Brewing ruleset has not been installed yet." : `Requires ${lobby.rulesetPlayerRange?.min}–${lobby.rulesetPlayerRange?.max} players.`}
+                    </p>
+                  </div>
+                )}
+                {lobby.game && (
+                  <div className="mt-5 rounded-xl border border-violet-200/10 bg-violet-300/[0.06] p-4">
+                    <p className="text-sm font-medium text-violet-100">{lobby.game.phase === "finished" ? "Game finished" : "Game in progress"}</p>
+                    <p className="mt-1 text-xs capitalize text-zinc-400">{lobby.game.phase === "finished" ? "The previous game is complete. The host can prepare the next game here." : `${lobby.game.phase} · Day ${lobby.game.dayNumber}`}</p>
+                    <Link href={`/room/${code}/play`} className="mt-3 inline-flex text-xs font-medium text-violet-200 underline decoration-violet-200/30 underline-offset-4">Open your private game view</Link>
+                  </div>
+                )}
               </div>
 
               <div className="rounded-3xl border border-white/10 bg-[#131720] p-6 sm:p-7">
@@ -153,24 +273,28 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
                     <h2 className="font-medium">Players at the table</h2>
                     <p className="mt-1 text-xs text-zinc-500">{lobby.players.length} {lobby.players.length === 1 ? "player" : "players"} joined</p>
                   </div>
-                  <button onClick={() => void refresh()} className="rounded-lg border border-white/10 p-2 text-zinc-500 transition hover:text-white" aria-label="Refresh player list"><RefreshCw size={15} /></button>
+                  <div className="flex items-center gap-2">
+                    {me?.is_host && (!lobby.game || lobby.game.phase === "finished") && <button onClick={() => void manageBot("add")} disabled={botBusy || lobby.players.length >= (lobby.rulesetPlayerRange?.max ?? 15)} className="inline-flex items-center gap-2 rounded-lg border border-violet-200/15 bg-violet-300/[0.08] px-3 py-2 text-xs font-medium text-violet-100 transition hover:bg-violet-300/[0.14] disabled:opacity-40"><Plus size={14} /><Bot size={15} /> Add bot</button>}
+                    <button onClick={() => void refresh()} className="rounded-lg border border-white/10 p-2 text-zinc-500 transition hover:text-white" aria-label="Refresh player list"><RefreshCw size={15} /></button>
+                  </div>
                 </div>
                 <ul className="mt-2 divide-y divide-white/[0.06]">
                   {lobby.players.map((player, index) => {
                     const isMe = player.id === lobby.currentPlayerId;
                     return (
                       <li key={player.id} className="flex items-center gap-3 py-3.5">
-                        <div className={`grid size-10 shrink-0 place-items-center rounded-full text-sm font-medium ${player.is_host ? "bg-violet-300/15 text-violet-200" : "bg-white/[0.07] text-zinc-300"}`}>
-                          {player.display_name.trim().slice(0, 1).toUpperCase()}
+                        <div className={`grid size-10 shrink-0 place-items-center rounded-full text-sm font-medium ${player.is_bot ? "bg-cyan-300/10 text-cyan-200" : player.is_host ? "bg-violet-300/15 text-violet-200" : "bg-white/[0.07] text-zinc-300"}`}>
+                          {player.is_bot ? <Bot size={18} /> : player.display_name.trim().slice(0, 1).toUpperCase()}
                         </div>
                         <div className="min-w-0">
                           <p className="truncate text-sm text-zinc-200">{player.display_name}{isMe && <span className="ml-2 text-xs text-zinc-600">you</span>}</p>
-                          <p className="mt-0.5 text-xs text-zinc-600">{player.is_host ? "Host" : `Seat ${index + 1}`}</p>
+                          <p className="mt-0.5 text-xs text-zinc-600">{player.is_bot ? "Random bot" : player.is_host ? "Host" : `Seat ${index + 1}`}</p>
                         </div>
                         <span className={`ml-auto inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs ${player.is_ready ? "bg-emerald-300/10 text-emerald-200" : "bg-white/[0.05] text-zinc-500"}`}>
                           <span className={`size-1.5 rounded-full ${player.is_ready ? "bg-emerald-300" : "bg-zinc-600"}`} />
                           {player.is_ready ? "Ready" : "Waiting"}
                         </span>
+                        {me?.is_host && player.is_bot && (!lobby.game || lobby.game.phase === "finished") && <button onClick={() => void manageBot("remove", player.id)} disabled={botBusy} className="ml-1 rounded-lg p-2 text-zinc-600 transition hover:bg-rose-300/10 hover:text-rose-200 disabled:opacity-40" aria-label={`Remove ${player.display_name}`}><X size={15} /></button>}
                       </li>
                     );
                   })}
@@ -181,6 +305,34 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
                 </button>
               </div>
             </section>
+            {lobby.gameHistory?.length > 0 && (
+              <section className="mt-7 rounded-3xl border border-white/10 bg-[#131720] p-6 sm:p-7">
+                <div className="flex items-center justify-between border-b border-white/[0.08] pb-4">
+                  <div>
+                    <h2 className="font-medium">Previous games</h2>
+                    <p className="mt-1 text-xs text-zinc-500">Finished games from this room</p>
+                  </div>
+                  <span className="rounded-full bg-white/[0.06] px-3 py-1 text-xs text-zinc-400">{lobby.gameHistory.length}</span>
+                </div>
+                <ul className="divide-y divide-white/[0.06]">
+                  {lobby.gameHistory.map(game => (
+                    <li key={game.id} className="py-3">
+                      <details>
+                        <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-2 py-1 text-sm hover:text-white">
+                          <span className="font-medium text-zinc-200">Game {game.gameNumber} <span className="ml-2 text-xs font-normal capitalize text-zinc-500">{game.rulesetId.replaceAll("-", " ")} · Day {game.dayNumber}</span></span>
+                          <span className="text-xs text-amber-100">{game.winner ?? "Finished"}<span className="ml-2 text-zinc-600">{game.finishedAt.slice(0, 10)}</span></span>
+                        </summary>
+                        {game.publicState.revealedRoles?.length ? (
+                          <ul className="mt-3 grid gap-2 border-t border-white/[0.06] pt-3 sm:grid-cols-2">
+                            {game.publicState.revealedRoles.map(player => <li key={player.playerId} className="flex justify-between gap-3 rounded-lg bg-black/15 px-3 py-2 text-xs"><span className="text-zinc-300">{player.displayName}</span><span className="text-violet-200">{player.roleName}<span className="ml-1 text-zinc-600">· {player.team}</span></span></li>)}
+                          </ul>
+                        ) : <p className="mt-3 border-t border-white/[0.06] pt-3 text-xs text-zinc-500">Role reveal is unavailable for this archived game.</p>}
+                      </details>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
             {error && <p role="status" className="mt-4 rounded-xl border border-rose-300/15 bg-rose-300/[0.06] px-4 py-3 text-sm text-rose-200">{error}</p>}
             <p className="mt-5 text-center text-xs text-zinc-700">This lobby refreshes automatically every few seconds.</p>
           </>

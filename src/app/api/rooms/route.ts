@@ -3,6 +3,8 @@ import { randomInt } from "node:crypto";
 import { z } from "zod";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createPlayerSession, logSupabaseError } from "@/lib/rooms/session";
+import { consumeRateLimit } from "@/lib/rooms/rate-limit";
+import { publishRoomVersion } from "@/lib/rooms/realtime";
 
 const createRoomSchema = z.object({
   hostName: z.string().trim().min(2).max(24)
@@ -21,8 +23,12 @@ export async function POST(request: Request) {
 
   const supabase = createAdminClient();
   if (!supabase) {
-    return NextResponse.json({ error: "Supabase is not configured. Add the URL, anon key and service role key to .env.local." }, { status: 503 });
+    return NextResponse.json({ error: "Supabase is not configured. Add the URL and service role key to .env.local." }, { status: 503 });
   }
+
+  const rate = await consumeRateLimit(request, supabase, "create-room", 3, 60 * 60);
+  if (rate.unavailable) return NextResponse.json({ error: "Room creation is temporarily unavailable because rate limiting could not be checked." }, { status: 503 });
+  if (!rate.allowed) return NextResponse.json({ error: "Too many rooms created. Try again later." }, { status: 429, headers: { "Retry-After": String(rate.retryAfterSeconds) } });
 
   // Retry rare room-code collisions. Database uniqueness is the final guard.
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -36,9 +42,13 @@ export async function POST(request: Request) {
         room_id: room.id,
         display_name: parsed.data.hostName,
         session_token_hash: session.tokenHash,
+        session_expires_at: session.expiresAt,
         is_host: true
       });
-      if (!playerError) return NextResponse.json({ code, sessionToken: session.token }, { status: 201 });
+      if (!playerError) {
+        await publishRoomVersion(supabase, room.id, 1);
+        return NextResponse.json({ code, sessionToken: session.token }, { status: 201 });
+      }
 
       await supabase.from("rooms").delete().eq("id", room.id);
       logSupabaseError("Host player insert failed", playerError);

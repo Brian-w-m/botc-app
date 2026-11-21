@@ -5,7 +5,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 export function createPlayerSession() {
   const token = randomBytes(32).toString("base64url");
   const tokenHash = createHash("sha256").update(token).digest("hex");
-  return { token, tokenHash };
+  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+  return { token, tokenHash, expiresAt };
 }
 
 export function getPlayerSessionHash(request: Request) {
@@ -25,6 +26,8 @@ export async function findRoomPlayer(
     .select("id, display_name, is_host, is_ready")
     .eq("room_id", roomId)
     .eq("session_token_hash", sessionHash)
+    .is("session_revoked_at", null)
+    .gt("session_expires_at", new Date().toISOString())
     .maybeSingle();
 }
 
