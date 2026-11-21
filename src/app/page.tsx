@@ -34,6 +34,7 @@ export default function Home() {
               <Link href="/create" className="inline-flex items-center gap-2 rounded-xl bg-violet-300 px-5 py-3.5 font-semibold text-zinc-950 transition hover:bg-violet-200">
                 Create a room <ArrowUpRight size={18} />
               </Link>
+              <Link href="/join" className="rounded-xl border border-white/10 px-5 py-3.5 font-medium text-zinc-300 transition hover:bg-white/[0.05]">Join a room</Link>
               <a href="#how-it-works" className="rounded-xl border border-white/10 px-5 py-3.5 font-medium text-zinc-300 transition hover:bg-white/[0.05]">Explore the foundation</a>
             </div>
             <p className="mt-5 text-xs text-zinc-600">Original placeholder content only · No licensed scripts included</p>
@@ -53,7 +54,7 @@ export default function Home() {
                 <p className="mt-2 text-xs text-zinc-600">ROOM CODE</p>
               </div>
               <div className="space-y-3">
-                {["Player One", "Player Two", "Player Three"].map((name, i) => (
+                {["Player One", "Player Two", "Player Three"].map(name => (
                   <div key={name} className="flex items-center gap-3 rounded-xl bg-white/[0.035] p-3">
                     <div className="grid size-9 place-items-center rounded-full bg-white/[0.07] text-sm text-zinc-300">{name[name.length - 1]}</div>
                     <span className="text-sm text-zinc-300">{name}</span>

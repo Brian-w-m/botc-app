@@ -28,11 +28,15 @@ npm run build
 
 ## Supabase setup
 1. Create a Supabase project.
-2. Apply `supabase/migrations/0001_initial.sql` using the Supabase SQL editor or CLI.
-3. Copy the project URL and anon key into `.env.local`.
+2. Apply `supabase/migrations/0001_initial.sql` and then `supabase/migrations/0002_multiplayer_lobby.sql` using the Supabase SQL editor or CLI.
+3. Copy the project URL into `.env.local`. The anon key is not used by this server-only lobby.
 4. Keep `SUPABASE_SERVICE_ROLE_KEY` server-only. Never expose it in client code.
-5. The server-side room endpoint uses the service role only after input validation.
-   Add rate limiting / CAPTCHA before exposing public room creation.
+5. The server-side room and player endpoints use the service role after validating inputs.
+   Player session tokens are random per-tab tokens; the database stores only their SHA-256 hashes.
+   Add rate limiting / CAPTCHA before exposing public room creation or joining.
+
+The lobby polls the server every 2.5 seconds for player and ready-state changes. Open a room
+in one tab, then join it from other tabs or devices using its six-character code.
 
 ## Deploy to Vercel
 Import this repository into Vercel, set the three environment variables, and deploy.
@@ -52,7 +56,7 @@ versioned module. All clients must receive filtered state only; never publish th
 authoritative state or private player data to a shared Realtime channel.
 
 ## Security work required before production
-- Add Supabase Auth or signed, revocable player sessions before allowing room actions.
+- Add session expiry and a revocation flow, or Supabase Auth, before allowing sensitive room actions.
 - Replace the starter room-creation service-role flow with a hardened server command
   layer, rate limits, idempotency keys and abuse controls.
 - Add transactional RPCs for all state mutations and optimistic version checks.

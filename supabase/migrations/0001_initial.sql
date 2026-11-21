@@ -1,5 +1,4 @@
--- Initial schema only. Player identity/session tables and command RPCs are deliberately
--- deferred until their threat model and auth flow are implemented.
+-- Base room schema. Player identity and lobby session tables are added in 0002.
 create extension if not exists pgcrypto;
 
 create table if not exists public.rooms (

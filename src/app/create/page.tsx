@@ -19,6 +19,7 @@ export default function CreateRoomPage() {
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error ?? "Unable to create room.");
+      window.sessionStorage.setItem(`nightfall:session:${result.code}`, result.sessionToken);
       window.location.assign(`/room/${result.code}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Something went wrong.");
@@ -41,7 +42,7 @@ export default function CreateRoomPage() {
               {busy && <LoaderCircle className="animate-spin" size={17}/>} Create room
             </button>
           </form>
-          <p className="mt-5 text-xs leading-5 text-zinc-600">Room creation requires Supabase configuration. Player authentication and session security are part of the next milestone.</p>
+          <p className="mt-5 text-xs leading-5 text-zinc-600">Your private player session stays in this browser tab. Share the room code to invite others.</p>
         </div>
       </div>
     </main>
