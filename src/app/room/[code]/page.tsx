@@ -4,7 +4,9 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, Bot, Check, Clipboard, LoaderCircle, LogOut, MoonStar, Plus, RefreshCw, UsersRound, X } from "lucide-react";
 import JoinRoomForm from "@/components/JoinRoomForm";
+import RoleSprite from "@/components/RoleSprite";
 import { getBrowserSupabaseClient } from "@/lib/supabase/browser";
+import { forgetPlayerSession, getPlayerSession } from "@/lib/rooms/client-session";
 
 type LobbyPlayer = {
   id: string;
@@ -52,7 +54,7 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
       if (!active) return;
       const normalized = routeCode.toUpperCase();
       setCode(normalized);
-      const savedToken = window.sessionStorage.getItem(`nightfall:session:${normalized}`) ?? "";
+      const savedToken = getPlayerSession(normalized);
       setToken(savedToken);
       if (!savedToken) setLoading(false);
     });
@@ -139,7 +141,8 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error ?? "Unable to leave the room.");
-      window.sessionStorage.removeItem(`nightfall:session:${code}`);
+      const displayName = lobby?.players.find(player => player.id === lobby.currentPlayerId)?.display_name ?? "";
+      forgetPlayerSession(code, displayName);
       setToken("");
       setLobby(null);
       setLoading(false);
@@ -204,7 +207,7 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
             <h1 className="mt-3 text-3xl font-semibold">Take your seat</h1>
             <p className="mb-8 mt-3 leading-7 text-zinc-400">Choose a display name to join this table and see who else is here.</p>
             <JoinRoomForm initialCode={code} onJoined={() => {
-              setToken(window.sessionStorage.getItem(`nightfall:session:${code}`) ?? "");
+              setToken(getPlayerSession(code));
               setLoading(true);
             }} />
           </section>
@@ -324,7 +327,7 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
                         </summary>
                         {game.publicState.revealedRoles?.length ? (
                           <ul className="mt-3 grid gap-2 border-t border-white/[0.06] pt-3 sm:grid-cols-2">
-                            {game.publicState.revealedRoles.map(player => <li key={player.playerId} className="flex justify-between gap-3 rounded-lg bg-black/15 px-3 py-2 text-xs"><span className="text-zinc-300">{player.displayName}</span><span className="text-violet-200">{player.roleName}<span className="ml-1 text-zinc-600">· {player.team}</span></span></li>)}
+                            {game.publicState.revealedRoles.map(player => <li key={player.playerId} className="flex items-center gap-2 rounded-lg bg-black/15 px-3 py-2 text-xs"><RoleSprite roleName={player.roleName} size={36} className="size-9 shrink-0" /><span className="min-w-0 text-zinc-300">{player.displayName}<span className="ml-2 text-violet-200">{player.roleName}</span><span className="ml-1 text-zinc-600">· {player.team}</span></span></li>)}
                           </ul>
                         ) : <p className="mt-3 border-t border-white/[0.06] pt-3 text-xs text-zinc-500">Role reveal is unavailable for this archived game.</p>}
                       </details>

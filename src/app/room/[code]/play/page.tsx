@@ -4,7 +4,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, LoaderCircle, MoonStar, Skull, UsersRound } from "lucide-react";
 import type { GameCommand, PlayerPrivateView, PublicGameView } from "@/domain/game/types";
+import RoleSprite from "@/components/RoleSprite";
 import { getBrowserSupabaseClient } from "@/lib/supabase/browser";
+import { getPlayerSession } from "@/lib/rooms/client-session";
 
 type GameRead = {
   game: {
@@ -29,10 +31,12 @@ export default function PlayPage({ params }: { params: Promise<{ code: string }>
   const [code, setCode] = useState("");
   const [token, setToken] = useState("");
   const [gameRead, setGameRead] = useState<GameRead | null>(null);
+  const gameReadRef = useRef<GameRead | null>(null);
   const [loading, setLoading] = useState(true);
   const [actionId, setActionId] = useState("");
   const [clockNow, setClockNow] = useState(0);
   const autoOpenPending = useRef(false);
+  const voteAdvancePending = useRef<string | null>(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -41,25 +45,41 @@ export default function PlayPage({ params }: { params: Promise<{ code: string }>
       if (!active) return;
       const normalized = routeCode.toUpperCase();
       setCode(normalized);
-      const savedToken = window.sessionStorage.getItem(`nightfall:session:${normalized}`) ?? "";
+      const savedToken = getPlayerSession(normalized);
       setToken(savedToken);
       if (!savedToken) setLoading(false);
     });
     return () => { active = false; };
   }, [params]);
 
-  const refresh = useCallback(async () => {
-    if (!code || !token) return;
+  const refresh = useCallback(async (minimumVersion = 0): Promise<GameRead | null> => {
+    if (!code || !token) return null;
     try {
-      const response = await fetch(`/api/rooms/${code}/game`, {
-        headers: { Authorization: `Bearer ${token}` },
-        cache: "no-store"
-      });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.error ?? "Unable to load the game.");
-      setGameRead(result);
+      let result: GameRead | null = null;
+      for (let attempt = 0; attempt < 20; attempt++) {
+        const response = await fetch(`/api/rooms/${code}/game`, {
+          headers: { Authorization: `Bearer ${token}` },
+          cache: "no-store"
+        });
+        const snapshot = await response.json();
+        if (!response.ok) throw new Error(snapshot.error ?? "Unable to load the game.");
+        result = snapshot as GameRead;
+        if (!result.game || result.game.version >= minimumVersion) break;
+        await new Promise(resolve => window.setTimeout(resolve, 150));
+      }
+      if (!result || (result.game && result.game.version < minimumVersion)) {
+        throw new Error("The latest game state is not available yet. Please try again.");
+      }
+      const current = gameReadRef.current;
+      const latest = current?.game && result.game && current.game.id === result.game.id && current.game.version > result.game.version
+        ? current
+        : result;
+      gameReadRef.current = latest;
+      setGameRead(latest);
+      return latest;
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Unable to refresh the game.");
+      return null;
     } finally {
       setLoading(false);
     }
@@ -88,15 +108,16 @@ export default function PlayPage({ params }: { params: Promise<{ code: string }>
   }, [code, gameRead?.botActionPending, gameRead?.isHost, refresh, token]);
 
   const discussionDeadline = gameRead?.game?.publicState.discussionEndsAt ?? null;
+  const voteTurnDeadline = gameRead?.game?.publicState.voteTurnEndsAt ?? null;
   useEffect(() => {
     if (gameRead?.game?.phase !== "day" || gameRead.game.publicState.dayStage !== "discussion") autoOpenPending.current = false;
   }, [discussionDeadline, gameRead?.game?.phase, gameRead?.game?.publicState.dayStage]);
   useEffect(() => {
-    if (!discussionDeadline) return;
+    if (!discussionDeadline && !voteTurnDeadline) return;
     setClockNow(Date.now());
-    const timer = window.setInterval(() => setClockNow(Date.now()), 1000);
+    const timer = window.setInterval(() => setClockNow(Date.now()), 200);
     return () => window.clearInterval(timer);
-  }, [discussionDeadline]);
+  }, [discussionDeadline, voteTurnDeadline]);
 
   useEffect(() => {
     const game = gameRead?.game;
@@ -120,6 +141,45 @@ export default function PlayPage({ params }: { params: Promise<{ code: string }>
   }, [code, discussionDeadline, gameRead?.game, refresh, token]);
 
   useEffect(() => {
+    const game = gameRead?.game;
+    const nomination = game?.publicState.currentNomination;
+    const voter = game?.publicState.currentVoter;
+    if (!game || !token || !code || !nomination || !voter || !voteTurnDeadline) return;
+
+    const requestKey = `${game.id}:${nomination.nomineeId}:${voter.playerId}:${voteTurnDeadline}`;
+    const timer = window.setInterval(() => {
+      if (Date.now() < voteTurnDeadline || voteAdvancePending.current === requestKey) return;
+      const latest = gameReadRef.current;
+      if (!latest?.game || latest.game.id !== game.id
+        || latest.game.publicState.currentNomination?.nomineeId !== nomination.nomineeId
+        || latest.game.publicState.currentVoter?.playerId !== voter.playerId) return;
+
+      voteAdvancePending.current = requestKey;
+      void fetch(`/api/rooms/${code}/game/commands`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          commandId: crypto.randomUUID(),
+          expectedVersion: latest.game.version,
+          command: { type: "ADVANCE_VOTE" }
+        })
+      }).then(async response => {
+        if (!response.ok) {
+          await refresh();
+          return;
+        }
+        const result = await response.json();
+        await refresh(typeof result.version === "number" ? result.version : 0);
+      }).catch(() => setError("The vote sweep could not advance. Retrying…"))
+        .finally(() => {
+          if (voteAdvancePending.current === requestKey) voteAdvancePending.current = null;
+        });
+    }, 100);
+
+    return () => window.clearInterval(timer);
+  }, [code, gameRead?.game, refresh, token, voteTurnDeadline]);
+
+  useEffect(() => {
     const roomId = gameRead?.game?.roomId;
     const client = getBrowserSupabaseClient();
     if (!roomId || !client || !token) return;
@@ -136,19 +196,37 @@ export default function PlayPage({ params }: { params: Promise<{ code: string }>
     if (!game) return;
     setActionId(action.id);
     setError("");
+    const commandId = crypto.randomUUID();
+    let expectedVersion = game.version;
     try {
-      const response = await fetch(`/api/rooms/${code}/game/commands`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
-          commandId: crypto.randomUUID(),
-          expectedVersion: game.version,
-          command: action.command satisfies GameCommand
-        })
-      });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.error ?? "That action could not be submitted.");
-      await refresh();
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const response = await fetch(`/api/rooms/${code}/game/commands`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+          body: JSON.stringify({
+            commandId,
+            expectedVersion,
+            command: action.command satisfies GameCommand
+          })
+        });
+        const result = await response.json();
+        if (response.status === 409 && typeof result.currentVersion === "number") {
+          const latest = await refresh(result.currentVersion);
+          const available = latest?.privateState?.actions.some(candidate => JSON.stringify(candidate.command) === JSON.stringify(action.command));
+          const sameVote = action.command.type !== "VOTE"
+            || latest?.game?.publicState.currentNomination?.nomineeId === game.publicState.currentNomination?.nomineeId;
+          if (!latest?.game || !available || !sameVote) {
+            throw new Error("The game changed while your action was being submitted. We refreshed the game; please check the current vote and try again if the action is still available.");
+          }
+          expectedVersion = latest.game.version;
+          await new Promise(resolve => window.setTimeout(resolve, 30 + attempt * 10));
+          continue;
+        }
+        if (!response.ok) throw new Error(result.error ?? "That action could not be submitted.");
+        await refresh(typeof result.version === "number" ? result.version : 0);
+        return;
+      }
+      throw new Error("The game is changing quickly. It has been refreshed; please try your action again.");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "That action could not be submitted.");
       await refresh();
@@ -160,10 +238,11 @@ export default function PlayPage({ params }: { params: Promise<{ code: string }>
   const game = gameRead?.game;
   const privateView = gameRead?.privateState;
   const publicView = game?.publicState;
-  const dayActions = game?.phase === "day" ? privateView?.actions.filter(action => action.command.type === "NOMINATE" || action.command.type === "VOTE" || action.command.type === "OPEN_NOMINATIONS" || action.command.type === "CLOSE_NOMINATIONS") ?? [] : [];
-  const roleActions = privateView?.actions.filter(action => action.command.type !== "NOMINATE" && action.command.type !== "VOTE" && action.command.type !== "OPEN_NOMINATIONS" && action.command.type !== "CLOSE_NOMINATIONS") ?? [];
+  const dayActions = game?.phase === "day" ? privateView?.actions.filter(action => action.command.type === "NOMINATE" || action.command.type === "VOTE" || action.command.type === "ADVANCE_VOTE" || action.command.type === "OPEN_NOMINATIONS" || action.command.type === "CLOSE_NOMINATIONS") ?? [] : [];
+  const roleActions = privateView?.actions.filter(action => action.command.type !== "NOMINATE" && action.command.type !== "VOTE" && action.command.type !== "ADVANCE_VOTE" && action.command.type !== "OPEN_NOMINATIONS" && action.command.type !== "CLOSE_NOMINATIONS") ?? [];
   const discussionSeconds = discussionDeadline ? Math.max(0, Math.ceil((discussionDeadline - clockNow) / 1000)) : 0;
   const discussionClock = `${Math.floor(discussionSeconds / 60)}:${String(discussionSeconds % 60).padStart(2, "0")}`;
+  const voteCountdownSeconds = voteTurnDeadline ? Math.max(0, Math.ceil((voteTurnDeadline - clockNow) / 1000)) : null;
 
   return (
     <main className="min-h-screen px-5 py-7 sm:px-8 sm:py-10">
@@ -200,9 +279,15 @@ export default function PlayPage({ params }: { params: Promise<{ code: string }>
                     <h3 className="text-sm font-semibold tracking-wide text-amber-50">Everyone’s roles</h3>
                     <ul className="mt-3 divide-y divide-white/[0.07]">
                       {publicView.revealedRoles.map(player => (
-                        <li key={player.playerId} className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 py-3">
-                          <span className="text-sm font-medium text-zinc-100">{player.displayName}{player.alive ? "" : " · dead"}</span>
-                          <span className="text-sm text-amber-100">{player.roleName} <span className="text-zinc-500">· {player.team}</span>{player.believedAs && <span className="block text-xs text-zinc-500">Believed they were {player.believedAs}</span>}</span>
+                        <li key={player.playerId} className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 py-3">
+                          <div className="flex items-center gap-3">
+                            <RoleSprite roleName={player.roleName} size={44} className="size-11 shrink-0" />
+                            <div>
+                              <span className="text-sm font-medium text-zinc-100">{player.displayName}{player.alive ? "" : " · dead"}</span>
+                              <p className="mt-0.5 text-xs text-amber-100">{player.roleName} <span className="text-zinc-500">· {player.team}</span></p>
+                              {player.believedAs && <span className="block text-xs text-zinc-500">Believed they were {player.believedAs}</span>}
+                            </div>
+                          </div>
                         </li>
                       ))}
                     </ul>
@@ -232,8 +317,9 @@ export default function PlayPage({ params }: { params: Promise<{ code: string }>
                       <p className="text-xs uppercase tracking-wider text-amber-100/70">Current nomination</p>
                       <p className="mt-1 font-medium">{publicView.currentNomination.nomineeName}</p>
                       <p className="mt-1 text-xs text-zinc-500">{publicView.currentNomination.votesFor} votes so far</p>
+                      {publicView.currentVoter && <p className="mt-2 text-xs text-amber-100/70">Voting proceeds clockwise, starting with the nominee. {publicView.currentVoter.displayName}’s seat passes in {voteCountdownSeconds ?? 2}s. Raise your hand before the sweep reaches you; a hand left down counts as no.</p>}
                       <div className="mt-3 flex flex-wrap gap-2">
-                        {publicView.currentNomination.ballots.map(ballot => <span key={ballot.playerId} className={`rounded-full px-2.5 py-1 text-xs ${ballot.vote ? "bg-emerald-300/10 text-emerald-200" : "bg-zinc-700/50 text-zinc-400"}`}>{ballot.displayName}: {ballot.vote ? "Yes" : "No"}</span>)}
+                        {publicView.currentNomination.ballots.map(ballot => <span key={ballot.playerId} className="rounded-full bg-emerald-300/10 px-2.5 py-1 text-xs text-emerald-200">{ballot.displayName}: Yes</span>)}
                       </div>
                     </div>
                   )}
@@ -265,7 +351,7 @@ export default function PlayPage({ params }: { params: Promise<{ code: string }>
                         <div className="mt-3 grid gap-2 sm:grid-cols-2">
                           {dayActions.map(action => <button key={action.id} onClick={() => void sendAction(action)} disabled={Boolean(actionId)} className="rounded-xl border border-white/10 bg-white/[0.05] px-3 py-2.5 text-left text-sm text-zinc-200 transition hover:border-amber-100/20 hover:bg-amber-100/[0.08] disabled:opacity-50">{action.label}</button>)}
                         </div>
-                      ) : <p className="mt-3 text-xs text-zinc-500">{publicView?.currentNomination ? "Your vote may already be recorded, or the game is waiting for the other players." : "You may have already nominated today. Nominations can also be unavailable while a vote is open."}</p>}
+                      ) : <p className="mt-3 text-xs text-zinc-500">{publicView?.currentNomination ? "No button is needed for a no vote. If your hand is down when the host passes your seat, it counts as no." : "You may have already nominated today. Nominations can also be unavailable while a vote is open."}</p>}
                     </section>
                   )}
                 </article>
@@ -275,8 +361,15 @@ export default function PlayPage({ params }: { params: Promise<{ code: string }>
                 {privateView ? (
                   <>
                     <p className="text-xs font-medium tracking-[0.18em] text-violet-200">YOUR PRIVATE ROLE</p>
-                    <h2 className="mt-3 text-3xl font-semibold">{privateView.role.name}</h2>
-                    <p className="mt-2 text-sm capitalize text-zinc-400">{privateView.role.team}</p>
+                    <div className="mt-3 flex items-center gap-4">
+                      <div className="flex size-24 shrink-0 items-center justify-center rounded-2xl border border-violet-200/15 bg-black/20 shadow-inner shadow-black/30">
+                        <RoleSprite roleName={privateView.role.name} size={80} className="size-20" />
+                      </div>
+                      <div>
+                        <h2 className="text-3xl font-semibold">{privateView.role.name}</h2>
+                        <p className="mt-2 text-sm capitalize text-zinc-400">{privateView.role.team}</p>
+                      </div>
+                    </div>
                     <p className="mt-5 border-t border-white/10 pt-5 text-sm leading-6 text-zinc-300">{privateView.role.ability}</p>
                     {privateView.information.map((info, index) => <p key={`${index}-${info}`} className="mt-3 rounded-xl bg-black/20 p-3 text-sm leading-6 text-violet-100/90">{info}</p>)}
                     {privateView.prompt && <p className="mt-5 text-sm font-medium leading-6 text-white">{privateView.prompt}</p>}

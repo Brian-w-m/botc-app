@@ -19,6 +19,8 @@ export interface PublicGameView {
     hasGhostVote: boolean;
   }>;
   currentNomination: { nomineeId: string; nomineeName: string; votesFor: number; ballots: Array<{ playerId: string; displayName: string; vote: boolean }> } | null;
+  currentVoter?: { playerId: string; displayName: string } | null;
+  voteTurnEndsAt?: number | null;
   executionBlock?: { nomineeId: string; nomineeName: string; votes: number } | null;
   executionBlockTied?: boolean;
   livingPlayerCount?: number;

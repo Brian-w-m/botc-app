@@ -13,6 +13,7 @@ type TestPlayer = {
   realRole: string;
   team: "Townsfolk" | "Outsider" | "Minion" | "Demon";
   poisoned: boolean;
+  poisonedBy?: string;
   onceUsed: boolean;
   ghostVote: boolean;
   info: string[];
@@ -37,7 +38,13 @@ type TestSecret = {
   executionBlockTied: boolean;
   nominatedBy: string[];
   botNominationsDecided: string[];
+  botVotesDecided?: string[];
   votes: Record<string, boolean>;
+  voteChoices: Record<string, "yes" | "no" | "abstain">;
+  voteOrder: string[];
+  currentVoterId: string | null;
+  voteCursor?: number;
+  voteTurnEndsAt?: number | null;
   currentNominee: string | null;
   virginSpent: boolean;
   notices: string[];
@@ -63,6 +70,7 @@ function makeGame(roleIds: string[], botIds: string[] = []) {
     player.team = teams[role];
     player.alive = true;
     player.poisoned = false;
+    delete player.poisonedBy;
     player.onceUsed = false;
     player.info = [];
   });
@@ -84,6 +92,10 @@ function makeGame(roleIds: string[], botIds: string[] = []) {
   secret.nominatedBy = [];
   secret.botNominationsDecided = [];
   secret.votes = {};
+  secret.voteChoices = {};
+  secret.voteOrder = [];
+  secret.currentVoterId = null;
+  secret.voteCursor = 0;
   secret.currentNominee = null;
   secret.virginSpent = false;
   secret.notices = [];
@@ -94,11 +106,70 @@ function makeGame(roleIds: string[], botIds: string[] = []) {
 function asGame(secret: TestSecret): AuthoritativeGameState {
   return { phase: secret.phase, dayNumber: secret.day, publicState: null, secretState: secret as unknown as JsonValue };
 }
+function beginVote(secret: TestSecret, nomineeId: string) {
+  secret.currentNominee = nomineeId;
+  const nomineeSeat = secret.order.indexOf(nomineeId);
+  secret.voteOrder = secret.order.slice(nomineeSeat).concat(secret.order.slice(0, nomineeSeat));
+  secret.voteChoices = {};
+  secret.votes = {};
+  secret.currentVoterId = secret.voteOrder.find(id => {
+    const player = secret.players.find(candidate => candidate.id === id)!;
+    return player.alive || player.ghostVote;
+  }) ?? null;
+  secret.voteCursor = secret.voteOrder.findIndex(id => id === secret.currentVoterId);
+}
+function passVoteSweep(secret: TestSecret) {
+  const host = secret.players.find(player => player.isHost)!;
+  while (secret.currentNominee) {
+    secret.voteTurnEndsAt = 0;
+    const transition = troubleBrewing.applyCommand(asGame(secret), actor(host), { type: "ADVANCE_VOTE" }, () => 0.4);
+    Object.assign(secret, JSON.parse(JSON.stringify(transition.state.secretState)) as TestSecret);
+  }
+}
+function raiseSelectedHandsAndPass(secret: TestSecret, yesVoters: string[]) {
+  for (const id of yesVoters) {
+    const voter = secret.players.find(player => player.id === id)!;
+    const transition = troubleBrewing.applyCommand(asGame(secret), actor(voter), { type: "VOTE", vote: true }, () => 0.4);
+    Object.assign(secret, JSON.parse(JSON.stringify(transition.state.secretState)) as TestSecret);
+  }
+  passVoteSweep(secret);
+}
 function actor(player: TestPlayer): GameParticipant {
   return { id: player.id, displayName: player.name, isHost: player.isHost, isBot: player.isBot };
 }
 
 describe("Trouble Brewing character audit", () => {
+  it("ends a Poisoner's ongoing poison as soon as the Poisoner dies", () => {
+    const secret = makeGame(["imp", "washerwoman", "empath", "baron", "poisoner", "saint", "undertaker"]);
+    const imp = secret.players[0];
+    const empath = secret.players[2];
+    const poisoner = secret.players[4];
+    secret.current = { playerId: poisoner.id, kind: "poisoner" };
+    secret.queue = [{ playerId: imp.id, kind: "imp" }];
+
+    const poisoned = troubleBrewing.applyCommand(asGame(secret), actor(poisoner), { type: "NIGHT_CHOOSE", targetPlayerId: empath.id }, () => 0.4);
+    const poisonedState = JSON.parse(JSON.stringify(poisoned.state.secretState)) as TestSecret;
+    expect(poisonedState.players[2].poisoned).toBe(true);
+    expect(poisonedState.current).toMatchObject({ playerId: imp.id, kind: "imp" });
+
+    const killed = troubleBrewing.applyCommand(asGame(poisonedState), actor(imp), { type: "NIGHT_CHOOSE", targetPlayerId: poisoner.id }, () => 0.4);
+    const afterDeath = JSON.parse(JSON.stringify(killed.state.secretState)) as TestSecret;
+    expect(afterDeath.players[4].alive).toBe(false);
+    expect(afterDeath.players[2].poisoned).toBe(false);
+    expect(afterDeath.players[2].poisonedBy).toBeUndefined();
+  });
+
+  it("ends Monk protection when the Monk is dead", () => {
+    const secret = makeGame(["imp", "monk", "empath", "baron", "saint"]);
+    secret.nightPicks[secret.players[1].id] = [secret.players[2].id];
+    secret.players[1].alive = false;
+    secret.current = { playerId: secret.players[0].id, kind: "imp" };
+
+    const result = troubleBrewing.applyCommand(asGame(secret), actor(secret.players[0]), { type: "NIGHT_CHOOSE", targetPlayerId: secret.players[2].id }, () => 0.4);
+    const updated = JSON.parse(JSON.stringify(result.state.secretState)) as TestSecret;
+    expect(updated.players[2].alive).toBe(false);
+  });
+
   it("has a player-facing ability for every Trouble Brewing character", () => {
     const characters = Object.keys(teams);
     const secret = makeGame(["washerwoman", "librarian", "imp", "baron", "saint"]);
@@ -120,6 +191,31 @@ describe("Trouble Brewing character audit", () => {
     const updated = JSON.parse(JSON.stringify(result.state.secretState)) as TestSecret;
     expect(updated.players[1].alive).toBe(false);
     expect(updated.players[1].info.some(info => info.startsWith("Undertaker"))).toBe(false);
+  });
+
+  it("does not wake a Fortune Teller killed before their turn", () => {
+    const secret = makeGame(["imp", "washerwoman", "empath", "fortune-teller", "poisoner", "baron", "saint"]);
+    const imp = secret.players[0];
+    const fortuneTeller = secret.players[3];
+    secret.current = { playerId: imp.id, kind: "imp" };
+
+    const result = troubleBrewing.applyCommand(asGame(secret), actor(imp), { type: "NIGHT_CHOOSE", targetPlayerId: fortuneTeller.id }, () => 0.4);
+    const updated = JSON.parse(JSON.stringify(result.state.secretState)) as TestSecret;
+    expect(updated.players[3].alive).toBe(false);
+    expect(updated.players[3].info.some(info => info.startsWith("Fortune Teller"))).toBe(false);
+    expect(updated.current?.playerId).not.toBe(fortuneTeller.id);
+  });
+
+  it("ends the game for evil when a sober Saint is executed", () => {
+    const secret = makeGame(["washerwoman", "librarian", "imp", "baron", "saint"]);
+    secret.phase = "day";
+    secret.dayStage = "nominations";
+    secret.executionBlock = secret.players[4].id;
+    secret.executionBlockVotes = 3;
+
+    const result = troubleBrewing.applyCommand(asGame(secret), actor(secret.players[0]), { type: "CLOSE_NOMINATIONS" }, () => 0.4);
+    expect(result.state.phase).toBe("finished");
+    expect((result.state.secretState as unknown as TestSecret).winner).toBe("Evil");
   });
 
   it("resets the public log at dawn and keeps the new night result plus the day events", () => {
@@ -195,14 +291,17 @@ describe("Trouble Brewing character audit", () => {
     secret.players[4].alive = false;
     secret.currentNominee = secret.players[4].id;
     secret.votes = { [secret.players[0].id]: true };
+    secret.notices = ["Player 0 voted yes on Player 4."];
     const publicView = troubleBrewing.projectPublicState(secret as unknown as JsonValue) as unknown as {
       players: Array<{ displayName: string; alive: boolean; hasGhostVote: boolean }>;
-      currentNomination: { nomineeName: string; votesFor: number; ballots: Array<{ displayName: string; vote: boolean }> };
+      currentNomination: { nomineeName: string; votesFor: number; ballots: Array<{ displayName: string; vote: boolean | null }> };
       revealedRoles?: unknown[];
+      notices: string[];
     };
     expect(publicView.players[4]).toMatchObject({ displayName: "Player 4", alive: false, hasGhostVote: true });
     expect(publicView.currentNomination).toMatchObject({ nomineeName: "Player 4", votesFor: 1 });
     expect(publicView.currentNomination.ballots).toContainEqual(expect.objectContaining({ displayName: "Player 0", vote: true }));
+    expect(publicView.notices).toEqual([]);
 
     secret.phase = "finished";
     secret.winner = "Good";
@@ -210,19 +309,22 @@ describe("Trouble Brewing character audit", () => {
     expect(finished.revealedRoles).toHaveLength(5);
   });
 
-  it("lets a Butler vote no before their master votes but hides and rejects yes", () => {
+  it("lets a Butler keep their hand down for no and rejects yes before their Master votes", () => {
     const secret = makeGame(["butler", "washerwoman", "imp", "baron", "saint"]);
     secret.phase = "night";
     secret.current = { playerId: secret.players[0].id, kind: "butler" };
-    troubleBrewing.applyCommand(asGame(secret), actor(secret.players[0]), { type: "NIGHT_CHOOSE", targetPlayerId: secret.players[1].id }, () => 0.4);
+    const masterChoice = troubleBrewing.applyCommand(asGame(secret), actor(secret.players[0]), { type: "NIGHT_CHOOSE", targetPlayerId: secret.players[1].id }, () => 0.4);
+    Object.assign(secret, JSON.parse(JSON.stringify(masterChoice.state.secretState)) as TestSecret);
     secret.phase = "day";
     secret.dayStage = "nominations";
-    secret.currentNominee = secret.players[2].id;
+    beginVote(secret, secret.players[0].id);
     const voteView = troubleBrewing.projectPrivateState(secret as unknown as JsonValue, secret.players[0].id);
     expect(voteView?.actions.map(action => action.command)).not.toContainEqual({ type: "VOTE", vote: true });
-    expect(voteView?.actions.map(action => action.command)).toContainEqual({ type: "VOTE", vote: false });
-    const result = troubleBrewing.applyCommand(asGame(secret), actor(secret.players[0]), { type: "VOTE", vote: false }, () => 0.4);
-    expect((result.state.secretState as unknown as TestSecret).votes.p0).toBe(false);
+    expect(voteView?.actions.map(action => action.command)).not.toContainEqual({ type: "VOTE", vote: false });
+    expect(voteView?.actions.map(action => action.command)).not.toContainEqual({ type: "VOTE", vote: null });
+    secret.voteTurnEndsAt = 0;
+    const result = troubleBrewing.applyCommand(asGame(secret), actor(secret.players[0]), { type: "ADVANCE_VOTE" }, () => 0.4);
+    expect((result.state.secretState as unknown as TestSecret).votes.p0).toBeUndefined();
   });
 
   it("ends the day immediately when a sober Townsfolk triggers the Virgin", () => {
@@ -241,15 +343,13 @@ describe("Trouble Brewing character audit", () => {
     const secret = makeGame(["undertaker", "washerwoman", "imp", "baron", "saint"]);
     secret.phase = "day";
     secret.dayStage = "nominations";
-    secret.currentNominee = secret.players[1].id;
-    const voters = secret.players;
-    for (const voter of voters) {
-      const transition = troubleBrewing.applyCommand(asGame(secret), actor(voter), { type: "VOTE", vote: true }, () => 0.4);
-      Object.assign(secret, JSON.parse(JSON.stringify(transition.state.secretState)) as TestSecret);
-    }
+    beginVote(secret, secret.players[1].id);
+    raiseSelectedHandsAndPass(secret, secret.voteOrder);
     expect(secret.players[1].alive).toBe(true);
     expect(secret.phase).toBe("day");
     expect(secret.executionBlock).toBe(secret.players[1].id);
+    expect(secret.notices.some(notice => notice.includes("voted"))).toBe(false);
+    expect(secret.notices).toContain("Player 1 is on the block with 5 votes.");
     const close = troubleBrewing.applyCommand(asGame(secret), actor(secret.players[0]), { type: "CLOSE_NOMINATIONS" }, () => 0.4);
     Object.assign(secret, JSON.parse(JSON.stringify(close.state.secretState)) as TestSecret);
     expect(secret.players[1].alive).toBe(false);
@@ -266,12 +366,9 @@ describe("Trouble Brewing character audit", () => {
     const secret = makeGame(["imp", "scarlet-woman", "washerwoman", "butler", "saint"]);
     secret.phase = "day";
     secret.dayStage = "nominations";
-    secret.currentNominee = secret.players[0].id;
+    beginVote(secret, secret.players[0].id);
     secret.nightPicks[secret.players[3].id] = [secret.players[0].id];
-    for (const voter of secret.players) {
-      const transition = troubleBrewing.applyCommand(asGame(secret), actor(voter), { type: "VOTE", vote: true }, () => 0.4);
-      Object.assign(secret, JSON.parse(JSON.stringify(transition.state.secretState)) as TestSecret);
-    }
+    raiseSelectedHandsAndPass(secret, secret.voteOrder);
     expect(secret.players[0].alive).toBe(true);
     expect(secret.executionBlock).toBe(secret.players[0].id);
     const close = troubleBrewing.applyCommand(asGame(secret), actor(secret.players[0]), { type: "CLOSE_NOMINATIONS" }, () => 0.4);
@@ -300,6 +397,50 @@ describe("Trouble Brewing character audit", () => {
     expect(troubleBrewing.projectPrivateState(result.state.secretState, secret.players[0].id)?.actions.some(action => action.command.type === "VOTE")).toBe(true);
   });
 
+  it("collects votes clockwise starting with the nominee and lets a ghost abstain without spending their vote", () => {
+    const secret = makeGame(["washerwoman", "librarian", "imp", "baron", "saint"]);
+    secret.phase = "day";
+    secret.dayStage = "nominations";
+    secret.players[4].alive = false;
+    const nomination = troubleBrewing.applyCommand(asGame(secret), actor(secret.players[0]), { type: "NOMINATE", nomineeId: secret.players[3].id }, () => 0.4);
+    Object.assign(secret, JSON.parse(JSON.stringify(nomination.state.secretState)) as TestSecret);
+    expect(secret.currentVoterId).toBe("p3");
+    const nomineeView = troubleBrewing.projectPrivateState(secret as unknown as JsonValue, "p3");
+    expect(nomineeView?.actions.map(action => action.command)).toContainEqual({ type: "VOTE", vote: true });
+    expect(nomineeView?.actions.map(action => action.command)).not.toContainEqual({ type: "VOTE", vote: null });
+    const earlyVote = troubleBrewing.applyCommand(asGame(secret), actor(secret.players[0]), { type: "VOTE", vote: true }, () => 0.4);
+    Object.assign(secret, JSON.parse(JSON.stringify(earlyVote.state.secretState)) as TestSecret);
+    expect(secret.currentVoterId).toBe("p3");
+    const changedEarlyVote = troubleBrewing.applyCommand(asGame(secret), actor(secret.players[0]), { type: "VOTE", vote: false }, () => 0.4);
+    Object.assign(secret, JSON.parse(JSON.stringify(changedEarlyVote.state.secretState)) as TestSecret);
+
+    secret.voteTurnEndsAt = 0;
+    const passNominee = troubleBrewing.applyCommand(asGame(secret), actor(secret.players[0]), { type: "ADVANCE_VOTE" }, () => 0.4);
+    Object.assign(secret, JSON.parse(JSON.stringify(passNominee.state.secretState)) as TestSecret);
+    expect(secret.currentVoterId).toBe("p4");
+    secret.voteTurnEndsAt = 0;
+    const passGhost = troubleBrewing.applyCommand(asGame(secret), actor(secret.players[0]), { type: "ADVANCE_VOTE" }, () => 0.4);
+    Object.assign(secret, JSON.parse(JSON.stringify(passGhost.state.secretState)) as TestSecret);
+    expect(secret.players[4].ghostVote).toBe(true);
+    expect(secret.currentVoterId).toBe("p0");
+    expect(troubleBrewing.projectPublicState(secret as unknown as JsonValue)).toMatchObject({ currentVoter: { playerId: "p0", displayName: "Player 0" } });
+    passVoteSweep(secret);
+    expect(() => troubleBrewing.applyCommand(asGame(secret), actor(secret.players[0]), { type: "VOTE", vote: true }, () => 0.4)).toThrow(/seat has already been passed/i);
+  });
+
+  it("keeps a vote seat open until its two-second timer expires", () => {
+    const secret = makeGame(["washerwoman", "librarian", "imp", "baron", "saint"]);
+    secret.phase = "day";
+    secret.dayStage = "nominations";
+    beginVote(secret, secret.players[2].id);
+    secret.voteTurnEndsAt = Date.now() + 2000;
+
+    expect(() => troubleBrewing.applyCommand(asGame(secret), actor(secret.players[1]), { type: "ADVANCE_VOTE" }, () => 0.4)).toThrow(/still being counted/i);
+    secret.voteTurnEndsAt = Date.now() - 1;
+    const passed = troubleBrewing.applyCommand(asGame(secret), actor(secret.players[1]), { type: "ADVANCE_VOTE" }, () => 0.4);
+    expect((passed.state.secretState as unknown as TestSecret).currentVoterId).toBe("p3");
+  });
+
   it("keeps nominations open after a vote and executes only the highest vote getter when the host closes", () => {
     const secret = makeGame(["washerwoman", "librarian", "imp", "baron", "saint"]);
     secret.phase = "day";
@@ -307,16 +448,15 @@ describe("Trouble Brewing character audit", () => {
     const nominateAndVote = (nominator: TestPlayer, nominee: TestPlayer, yesVoters: string[]) => {
       const nomination = troubleBrewing.applyCommand(asGame(secret), actor(nominator), { type: "NOMINATE", nomineeId: nominee.id }, () => 0.4);
       Object.assign(secret, JSON.parse(JSON.stringify(nomination.state.secretState)) as TestSecret);
-      for (const voter of secret.players) {
-        const transition = troubleBrewing.applyCommand(asGame(secret), actor(voter), { type: "VOTE", vote: yesVoters.includes(voter.id) }, () => 0.4);
-        Object.assign(secret, JSON.parse(JSON.stringify(transition.state.secretState)) as TestSecret);
-      }
+      raiseSelectedHandsAndPass(secret, yesVoters);
     };
 
     nominateAndVote(secret.players[0], secret.players[1], ["p0", "p1", "p2"]);
     expect(secret.players[1].alive).toBe(true);
     expect(secret.phase).toBe("day");
     expect(secret.executionBlock).toBe(secret.players[1].id);
+    expect(secret.notices.some(notice => notice.includes("voted"))).toBe(false);
+    expect(secret.notices).toContain("Player 1 is on the block with 3 votes.");
     expect(troubleBrewing.projectPublicState(secret as unknown as JsonValue)).toMatchObject({ executionBlock: { nomineeName: "Player 1", votes: 3 } });
     const continuingNominationView = troubleBrewing.projectPrivateState(secret as unknown as JsonValue, secret.players[4].id);
     expect(continuingNominationView?.prompt).toMatch(/nominations continue/i);
@@ -341,11 +481,7 @@ describe("Trouble Brewing character audit", () => {
     for (const [nominator, nominee] of [[secret.players[0], secret.players[1]], [secret.players[1], secret.players[3]]] as const) {
       const nomination = troubleBrewing.applyCommand(asGame(secret), actor(nominator), { type: "NOMINATE", nomineeId: nominee.id }, () => 0.4);
       Object.assign(secret, JSON.parse(JSON.stringify(nomination.state.secretState)) as TestSecret);
-      for (const voter of secret.players) {
-        const yes = voter.id === "p0" || voter.id === "p1" || voter.id === "p2";
-        const transition = troubleBrewing.applyCommand(asGame(secret), actor(voter), { type: "VOTE", vote: yes }, () => 0.4);
-        Object.assign(secret, JSON.parse(JSON.stringify(transition.state.secretState)) as TestSecret);
-      }
+      raiseSelectedHandsAndPass(secret, ["p0", "p1", "p2"]);
     }
     expect(secret.executionBlock).toBeNull();
     expect(secret.executionBlockTied).toBe(true);
@@ -389,5 +525,22 @@ describe("Trouble Brewing character audit", () => {
     const publicView = troubleBrewing.projectPublicState(result!.state.secretState) as unknown as { currentNomination: { nomineeName: string }; notices: string[] };
     expect(publicView.currentNomination.nomineeName).toBeTruthy();
     expect(publicView.notices.some(notice => notice.includes("Player 1 nominated"))).toBe(true);
+  });
+
+  it("lets a bot raise its hand on its seat and waits for the sweep to pass it", () => {
+    const secret = makeGame(["washerwoman", "librarian", "imp", "baron", "saint"], ["p2"]);
+    secret.phase = "day";
+    secret.dayStage = "nominations";
+    const nomination = troubleBrewing.applyCommand(asGame(secret), actor(secret.players[0]), { type: "NOMINATE", nomineeId: secret.players[2].id }, () => 0.4);
+    const game = nomination.state;
+    expect((game.secretState as unknown as TestSecret).currentVoterId).toBe("p2");
+    expect(hasBotAction(troubleBrewing, game)).toBe(true);
+    const botVote = runNextBotAction(troubleBrewing, game, () => 0);
+    expect(botVote?.action.command.type).toBe("VOTE");
+    expect((botVote?.state.secretState as unknown as TestSecret).currentVoterId).toBe("p2");
+    expect((botVote?.state.secretState as unknown as TestSecret).botVotesDecided).toContain("p2");
+    (botVote!.state.secretState as unknown as TestSecret).voteTurnEndsAt = 0;
+    const advanced = troubleBrewing.applyCommand(botVote!.state, actor(secret.players[0]), { type: "ADVANCE_VOTE" }, () => 0.4);
+    expect((advanced.state.secretState as unknown as TestSecret).currentVoterId).toBe("p3");
   });
 });

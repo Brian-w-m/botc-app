@@ -30,8 +30,11 @@ npm run build
 3. Copy the project URL and anon/publishable key into `.env.local` for public room change notifications.
 4. Keep `SUPABASE_SERVICE_ROLE_KEY` server-only. Never expose it in client code.
 5. The server-side room, player, and game endpoints use the service role after validating inputs.
-   Player session tokens are random per-tab tokens; the database stores only their SHA-256 hashes.
-   Sessions expire after seven days and can be revoked by leaving a lobby. Game commands use
+   Player session tokens are random; the database stores only their SHA-256 hashes. The active
+   tab keeps its token in session storage, and the browser keeps a local recovery copy indexed
+   by room and display name. Reopen the room in the same browser or enter the same room code and
+   display name to resume that seat. Sessions expire after seven days and can be revoked by
+   leaving a lobby. Game commands use
    database transactions, idempotency keys, and version checks.
 
 The lobby uses public Supabase Realtime revision notifications and keeps a 2.5-second polling

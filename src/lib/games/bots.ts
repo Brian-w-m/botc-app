@@ -6,13 +6,32 @@ type BotState = {
   dayStage?: string | null;
   current: { playerId: string } | null;
   currentNominee: string | null;
+  currentVoterId?: string | null;
+  order?: string[];
+  voteOrder?: string[];
+  voteChoices?: Record<string, string>;
   nominatedBy?: string[];
   botNominationsDecided?: string[];
+  botVotesDecided?: string[];
   votes: Record<string, boolean>;
   players: BotPlayer[];
   botActionDueAt?: number;
 };
 export type AutomatedAction = { actorId: string; command: GameCommand };
+
+function currentVotePlayerId(state: BotState) {
+  if (state.currentVoterId) return state.currentVoterId;
+  if (!state.currentNominee) return null;
+  const seat = state.order?.indexOf(state.currentNominee) ?? -1;
+  const order = state.voteOrder?.length ? state.voteOrder : seat >= 0
+    ? [...(state.order ?? []).slice(seat), ...(state.order ?? []).slice(0, seat)]
+    : [];
+  const choices = state.voteChoices ?? Object.fromEntries(Object.entries(state.votes ?? {}).map(([id, vote]) => [id, vote ? "yes" : "no"]));
+  return order.find(id => {
+    const voter = state.players.find(player => player.id === id);
+    return voter && !Object.hasOwn(choices, id) && (voter.alive || voter.ghostVote);
+  }) ?? null;
+}
 
 function nextBot(game: AuthoritativeGameState) {
   const internal = game.secretState as unknown as BotState;
@@ -23,7 +42,8 @@ function nextBot(game: AuthoritativeGameState) {
   }
   if (internal.phase !== "day") return null;
   if (internal.currentNominee) {
-    const bot = bots.find(player => (player.alive || player.ghostVote) && !Object.hasOwn(internal.votes, player.id));
+    const currentVoterId = currentVotePlayerId(internal);
+    const bot = bots.find(player => player.id === currentVoterId && !internal.botVotesDecided?.includes(player.id) && (player.alive || player.ghostVote));
     return bot ? { bot, mode: "vote" as const } : null;
   }
   if ((internal.dayStage ?? "nominations") === "nominations") {
@@ -45,7 +65,7 @@ export function scheduleBotAction(ruleset: GameRuleset, game: AuthoritativeGameS
   const internal = JSON.parse(JSON.stringify(game.secretState)) as BotState;
   const next = nextBot({ ...game, secretState: internal as unknown as AuthoritativeGameState["secretState"] });
   if (next && (next.mode === "nomination" || availableChoices(ruleset, game, next.bot, next.mode).length > 0)) {
-    internal.botActionDueAt = dueAt;
+    internal.botActionDueAt = next.mode === "vote" ? Math.min(dueAt, Date.now() + 1000) : dueAt;
   } else {
     delete internal.botActionDueAt;
   }

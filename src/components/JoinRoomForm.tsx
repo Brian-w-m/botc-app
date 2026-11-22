@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ArrowRight, LoaderCircle, UsersRound } from "lucide-react";
+import { getNamedPlayerSession, rememberPlayerSession } from "@/lib/rooms/client-session";
 
 type JoinRoomFormProps = {
   initialCode?: string;
@@ -13,6 +14,15 @@ export default function JoinRoomForm({ initialCode = "", onJoined }: JoinRoomFor
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [reconnectAvailable, setReconnectAvailable] = useState(false);
+
+  useEffect(() => {
+    if (!code || name.trim().length < 2) {
+      setReconnectAvailable(false);
+      return;
+    }
+    setReconnectAvailable(Boolean(getNamedPlayerSession(code, name)));
+  }, [code, name]);
 
   async function joinRoom(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -20,6 +30,14 @@ export default function JoinRoomForm({ initialCode = "", onJoined }: JoinRoomFor
     setError("");
     const normalizedCode = code.trim().toUpperCase();
     try {
+      const savedToken = getNamedPlayerSession(normalizedCode, name);
+      if (savedToken) {
+        rememberPlayerSession(normalizedCode, name, savedToken);
+        if (onJoined) onJoined(normalizedCode);
+        else window.location.assign(`/room/${normalizedCode}`);
+        return;
+      }
+
       const response = await fetch(`/api/rooms/${normalizedCode}/players`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -28,7 +46,7 @@ export default function JoinRoomForm({ initialCode = "", onJoined }: JoinRoomFor
       const result = await response.json();
       if (!response.ok) throw new Error(result.error ?? "Unable to join room.");
 
-      window.sessionStorage.setItem(`nightfall:session:${normalizedCode}`, result.sessionToken);
+      rememberPlayerSession(normalizedCode, name, result.sessionToken);
       if (onJoined) onJoined(normalizedCode);
       else window.location.assign(`/room/${normalizedCode}`);
     } catch (cause) {
@@ -64,13 +82,14 @@ export default function JoinRoomForm({ initialCode = "", onJoined }: JoinRoomFor
         placeholder="e.g. Alex"
         className="w-full rounded-xl border border-white/10 bg-black/20 px-4 py-3.5 outline-none placeholder:text-zinc-700 focus:border-violet-300/60"
       />
+      {reconnectAvailable && <p className="text-xs text-emerald-200">A saved seat for this name was found on this browser. You can resume it.</p>}
       {error && <p role="alert" className="text-sm text-rose-300">{error}</p>}
       <button
         disabled={busy || code.length !== 6 || name.trim().length < 2}
         className="flex w-full items-center justify-center gap-2 rounded-xl bg-violet-300 px-5 py-3.5 font-semibold text-zinc-950 transition hover:bg-violet-200 disabled:cursor-not-allowed disabled:opacity-50"
       >
         {busy ? <LoaderCircle className="animate-spin" size={17} /> : onJoined ? <UsersRound size={17} /> : <ArrowRight size={17} />}
-        Join room
+        {reconnectAvailable ? "Resume seat" : "Join room"}
       </button>
     </form>
   );

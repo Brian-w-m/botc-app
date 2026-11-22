@@ -3,6 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, LoaderCircle, MoonStar } from "lucide-react";
+import { rememberPlayerSession } from "@/lib/rooms/client-session";
 
 export default function CreateRoomPage() {
   const [name, setName] = useState("");
@@ -19,7 +20,7 @@ export default function CreateRoomPage() {
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error ?? "Unable to create room.");
-      window.sessionStorage.setItem(`nightfall:session:${result.code}`, result.sessionToken);
+      rememberPlayerSession(result.code, name, result.sessionToken);
       window.location.assign(`/room/${result.code}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Something went wrong.");
@@ -42,7 +43,7 @@ export default function CreateRoomPage() {
               {busy && <LoaderCircle className="animate-spin" size={17}/>} Create room
             </button>
           </form>
-          <p className="mt-5 text-xs leading-5 text-zinc-600">Your private player session stays in this browser tab. Share the room code to invite others.</p>
+          <p className="mt-5 text-xs leading-5 text-zinc-600">Your seat can be resumed from this browser if you close the window. Share the room code to invite others.</p>
         </div>
       </div>
     </main>
