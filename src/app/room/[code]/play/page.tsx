@@ -88,9 +88,12 @@ export default function PlayPage({ params }: { params: Promise<{ code: string }>
   useEffect(() => {
     if (!token) return;
     void refresh();
-    const timer = window.setInterval(() => void refresh(), 2500);
+    // A vote seat lasts only two seconds. Keep the live view fresh enough that
+    // players don't submit a hand change against a several-second-old snapshot.
+    const voting = Boolean(gameRead?.game?.publicState.currentNomination);
+    const timer = window.setInterval(() => void refresh(), voting ? 400 : 2500);
     return () => window.clearInterval(timer);
-  }, [refresh, token]);
+  }, [gameRead?.game?.publicState.currentNomination?.nomineeId, refresh, token]);
 
   useEffect(() => {
     if (!token || !code || !gameRead?.isHost || !gameRead.botActionPending) return;
@@ -161,7 +164,9 @@ export default function PlayPage({ params }: { params: Promise<{ code: string }>
         body: JSON.stringify({
           commandId: crypto.randomUUID(),
           expectedVersion: latest.game.version,
-          command: { type: "ADVANCE_VOTE" }
+          // Bind this timer request to the seat it was created for. Concurrent
+          // clients can then safely treat an already-passed seat as superseded.
+          command: { type: "ADVANCE_VOTE", nomineeId: nomination.nomineeId, playerId: voter.playerId }
         })
       }).then(async response => {
         if (!response.ok) {
@@ -199,7 +204,7 @@ export default function PlayPage({ params }: { params: Promise<{ code: string }>
     const commandId = crypto.randomUUID();
     let expectedVersion = game.version;
     try {
-      for (let attempt = 0; attempt < 3; attempt++) {
+      for (let attempt = 0; attempt < 6; attempt++) {
         const response = await fetch(`/api/rooms/${code}/game/commands`, {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
@@ -216,10 +221,15 @@ export default function PlayPage({ params }: { params: Promise<{ code: string }>
           const sameVote = action.command.type !== "VOTE"
             || latest?.game?.publicState.currentNomination?.nomineeId === game.publicState.currentNomination?.nomineeId;
           if (!latest?.game || !available || !sameVote) {
+            if (action.command.type === "VOTE") {
+              throw new Error(sameVote
+                ? "This vote action is no longer available in the current state. Check the refreshed vote to see whether your hand was counted."
+                : "That nomination has finished. The current game state has been refreshed.");
+            }
             throw new Error("The game changed while your action was being submitted. We refreshed the game; please check the current vote and try again if the action is still available.");
           }
           expectedVersion = latest.game.version;
-          await new Promise(resolve => window.setTimeout(resolve, 30 + attempt * 10));
+          await new Promise(resolve => window.setTimeout(resolve, 50 + attempt * 40));
           continue;
         }
         if (!response.ok) throw new Error(result.error ?? "That action could not be submitted.");

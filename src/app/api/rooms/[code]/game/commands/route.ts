@@ -52,79 +52,120 @@ export async function POST(
   }
   if (!player) return NextResponse.json({ error: "Your player session is missing, expired, or revoked." }, { status: 401 });
 
-  const { data: game, error: gameError } = await supabase.from("games")
+  const { data: initialGame, error: gameError } = await supabase.from("games")
     .select("id, ruleset_id, ruleset_version, phase, day_number, version, public_state, secret_state, random_seed")
     .eq("room_id", room.id).maybeSingle();
   if (gameError) {
     logSupabaseError("Game lookup for command failed", gameError);
     return NextResponse.json({ error: "Could not load the game." }, { status: 500 });
   }
-  if (!game) return NextResponse.json({ error: "This room has no game in progress." }, { status: 409 });
+  if (!initialGame) return NextResponse.json({ error: "This room has no game in progress." }, { status: 409 });
 
   const { data: priorCommand, error: priorCommandError } = await supabase.from("game_events")
-    .select("version").eq("game_id", game.id).eq("command_id", parsed.data.commandId).maybeSingle();
+    .select("version").eq("game_id", initialGame.id).eq("command_id", parsed.data.commandId).maybeSingle();
   if (priorCommandError) {
     logSupabaseError("Idempotency lookup failed", priorCommandError);
     return NextResponse.json({ error: "Could not verify whether this action was already applied." }, { status: 500 });
   }
-  if (priorCommand) return NextResponse.json({ version: game.version, duplicate: true });
+  if (priorCommand) return NextResponse.json({ version: initialGame.version, duplicate: true });
 
-  if (game.version !== parsed.data.expectedVersion) {
-    return NextResponse.json({ error: "The game changed. Refresh before trying that action again.", currentVersion: game.version }, { status: 409 });
-  }
-
-  const ruleset = getRuleset(game.ruleset_id);
-  if (!ruleset || ruleset.version !== game.ruleset_version) {
+  const ruleset = getRuleset(initialGame.ruleset_id);
+  if (!ruleset || ruleset.version !== initialGame.ruleset_version) {
     return NextResponse.json({ error: "This game’s ruleset version is not installed on the server." }, { status: 503 });
   }
 
-  let transition;
-  const commandRandom = createSeededRandom(`${game.random_seed}:${game.version}:${parsed.data.commandId}`);
-  try {
-    transition = ruleset.applyCommand(
-      {
-        phase: game.phase,
-        dayNumber: game.day_number,
-        publicState: game.public_state,
-        secretState: game.secret_state
-      } as AuthoritativeGameState,
-      { id: player.id, displayName: player.display_name, isHost: player.is_host },
-      parsed.data.command as GameCommand,
-      commandRandom
-    );
-    transition = {
-      ...transition,
-      state: scheduleBotAction(ruleset, transition.state, Date.now() + 5000)
-    };
-  } catch (cause) {
-    if (cause instanceof GameCommandError) {
-      return NextResponse.json({ error: cause.message, code: cause.code }, { status: 400 });
+  const command = parsed.data.command as GameCommand;
+  const retryableVote = command.type === "VOTE" && typeof command.nomineeId === "string";
+  const retryableAdvance = command.type === "ADVANCE_VOTE"
+    && typeof command.nomineeId === "string" && typeof command.playerId === "string";
+  let game = initialGame;
+
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const secret = game.secret_state as { currentNominee?: string | null; currentVoterId?: string | null };
+    if (game.version !== parsed.data.expectedVersion) {
+      if (retryableVote && secret.currentNominee === command.nomineeId) {
+        // Vote choices are independent; reapply them to the latest nomination state.
+      } else if (retryableAdvance && secret.currentNominee === command.nomineeId && secret.currentVoterId !== command.playerId) {
+        return NextResponse.json({ version: game.version, superseded: true });
+      } else if (retryableAdvance && secret.currentNominee === command.nomineeId && secret.currentVoterId === command.playerId) {
+        // A vote changed the row while this same timed seat was waiting. Retry against it.
+      } else {
+        return NextResponse.json({ error: "The game changed. Your action may no longer be available.", currentVersion: game.version }, { status: 409 });
+      }
     }
-    console.error("Ruleset command resolution failed", cause);
-    return NextResponse.json({ error: "The game action could not be resolved." }, { status: 500 });
+
+    if (retryableVote && secret.currentNominee !== command.nomineeId) {
+      return NextResponse.json({ error: "That nomination has already moved on.", currentVersion: game.version }, { status: 409 });
+    }
+    if (retryableAdvance && (secret.currentNominee !== command.nomineeId || secret.currentVoterId !== command.playerId)) {
+      return NextResponse.json({ version: game.version, superseded: true });
+    }
+
+    let transition;
+    try {
+      transition = ruleset.applyCommand(
+        {
+          phase: game.phase,
+          dayNumber: game.day_number,
+          publicState: game.public_state,
+          secretState: game.secret_state
+        } as AuthoritativeGameState,
+        { id: player.id, displayName: player.display_name, isHost: player.is_host },
+        command,
+        createSeededRandom(`${game.random_seed}:${game.version}:${parsed.data.commandId}`)
+      );
+      transition = {
+        ...transition,
+        state: scheduleBotAction(ruleset, transition.state, Date.now() + 5000)
+      };
+    } catch (cause) {
+      if (cause instanceof GameCommandError) {
+        if (retryableAdvance && cause.code === "VOTE_TIMER_ACTIVE") {
+          return NextResponse.json({ version: game.version, pending: true });
+        }
+        return NextResponse.json({ error: cause.message, code: cause.code }, { status: 400 });
+      }
+      console.error("Ruleset command resolution failed", cause);
+      return NextResponse.json({ error: "The game action could not be resolved." }, { status: 500 });
+    }
+
+    const { data: commit, error: commitError } = await supabase.rpc("commit_game_command", {
+      p_game_id: game.id,
+      p_command_id: parsed.data.commandId,
+      p_expected_version: game.version,
+      p_actor_player_id: player.id,
+      p_next_phase: transition.state.phase,
+      p_next_day_number: transition.state.dayNumber,
+      p_public_state: transition.state.publicState,
+      p_secret_state: transition.state.secretState,
+      p_event_type: transition.eventType,
+      p_event_payload: transition.eventPayload
+    });
+    if (commitError) {
+      logSupabaseError("Game command transaction failed", commitError);
+      return NextResponse.json({ error: "Could not save the game action." }, { status: 500 });
+    }
+    const result = Array.isArray(commit) ? commit[0] : null;
+    if (!result) return NextResponse.json({ error: "The server did not confirm the game action." }, { status: 500 });
+    if (result.accepted) {
+      if (!result.duplicate) await publishRoomVersion(supabase, room.id, result.current_version);
+      return NextResponse.json({ version: result.current_version, duplicate: result.duplicate });
+    }
+
+    if (!retryableVote && !retryableAdvance) {
+      return NextResponse.json({ error: "The game changed. Refresh before trying that action again.", currentVersion: result.current_version }, { status: 409 });
+    }
+
+    const { data: latest, error: latestError } = await supabase.from("games")
+      .select("id, ruleset_id, ruleset_version, phase, day_number, version, public_state, secret_state, random_seed")
+      .eq("id", game.id).maybeSingle();
+    if (latestError) {
+      logSupabaseError("Game lookup while retrying a concurrent command failed", latestError);
+      return NextResponse.json({ error: "Could not refresh the game after a concurrent action." }, { status: 500 });
+    }
+    if (!latest) return NextResponse.json({ error: "This game no longer exists." }, { status: 409 });
+    game = latest;
   }
 
-  const { data: commit, error: commitError } = await supabase.rpc("commit_game_command", {
-    p_game_id: game.id,
-    p_command_id: parsed.data.commandId,
-    p_expected_version: parsed.data.expectedVersion,
-    p_actor_player_id: player.id,
-    p_next_phase: transition.state.phase,
-    p_next_day_number: transition.state.dayNumber,
-    p_public_state: transition.state.publicState,
-    p_secret_state: transition.state.secretState,
-    p_event_type: transition.eventType,
-    p_event_payload: transition.eventPayload
-  });
-  if (commitError) {
-    logSupabaseError("Game command transaction failed", commitError);
-    return NextResponse.json({ error: "Could not save the game action." }, { status: 500 });
-  }
-  const result = Array.isArray(commit) ? commit[0] : null;
-  if (!result) return NextResponse.json({ error: "The server did not confirm the game action." }, { status: 500 });
-  if (!result.accepted) {
-    return NextResponse.json({ error: "The game changed. Refresh before trying that action again.", currentVersion: result.current_version }, { status: 409 });
-  }
-  if (!result.duplicate) await publishRoomVersion(supabase, room.id, result.current_version);
-  return NextResponse.json({ version: result.current_version, duplicate: result.duplicate });
+  return NextResponse.json({ error: "The vote changed several times. Please check the latest vote state.", currentVersion: game.version }, { status: 409 });
 }

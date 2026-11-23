@@ -139,6 +139,25 @@ function actor(player: TestPlayer): GameParticipant {
 }
 
 describe("Trouble Brewing character audit", () => {
+  it.each(["sober", "drunk"] as const)("keeps the Washerwoman out of their own %s information pair", state => {
+    const secret = makeGame([state === "sober" ? "washerwoman" : "drunk", "poisoner", "imp", "baron", "librarian"]);
+    const washerwoman = secret.players[0];
+    const poisoner = secret.players[1];
+    if (state === "drunk") washerwoman.role = "washerwoman";
+    secret.firstNight = true;
+    secret.current = { playerId: poisoner.id, kind: "poisoner" };
+    secret.queue = [{ playerId: washerwoman.id, kind: "washerwoman" }];
+
+    const result = troubleBrewing.applyCommand(asGame(secret), actor(poisoner), { type: "NIGHT_CHOOSE", targetPlayerId: secret.players[2].id }, () => 0.4);
+    const updated = JSON.parse(JSON.stringify(result.state.secretState)) as TestSecret;
+    const info = updated.players[0].info.find(value => value.includes(" is the "));
+    const shownPlayers = info?.match(/Player \d+/g) ?? [];
+    expect(info).toBeTruthy();
+    expect(shownPlayers).toHaveLength(2);
+    expect(new Set(shownPlayers).size).toBe(2);
+    expect(shownPlayers).not.toContain("Player 0");
+  });
+
   it("ends a Poisoner's ongoing poison as soon as the Poisoner dies", () => {
     const secret = makeGame(["imp", "washerwoman", "empath", "baron", "poisoner", "saint", "undertaker"]);
     const imp = secret.players[0];
@@ -406,7 +425,7 @@ describe("Trouble Brewing character audit", () => {
     Object.assign(secret, JSON.parse(JSON.stringify(nomination.state.secretState)) as TestSecret);
     expect(secret.currentVoterId).toBe("p3");
     const nomineeView = troubleBrewing.projectPrivateState(secret as unknown as JsonValue, "p3");
-    expect(nomineeView?.actions.map(action => action.command)).toContainEqual({ type: "VOTE", vote: true });
+    expect(nomineeView?.actions.map(action => action.command)).toContainEqual({ type: "VOTE", vote: true, nomineeId: "p3" });
     expect(nomineeView?.actions.map(action => action.command)).not.toContainEqual({ type: "VOTE", vote: null });
     const earlyVote = troubleBrewing.applyCommand(asGame(secret), actor(secret.players[0]), { type: "VOTE", vote: true }, () => 0.4);
     Object.assign(secret, JSON.parse(JSON.stringify(earlyVote.state.secretState)) as TestSecret);
