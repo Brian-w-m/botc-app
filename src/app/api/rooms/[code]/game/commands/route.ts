@@ -78,10 +78,12 @@ export async function POST(
   const retryableVote = command.type === "VOTE" && typeof command.nomineeId === "string";
   const retryableAdvance = command.type === "ADVANCE_VOTE"
     && typeof command.nomineeId === "string" && typeof command.playerId === "string";
+  const retryableNominationStage = command.type === "ADVANCE_NOMINATION"
+    && typeof command.nomineeId === "string" && typeof command.stage === "string";
   let game = initialGame;
 
   for (let attempt = 0; attempt < 6; attempt++) {
-    const secret = game.secret_state as { currentNominee?: string | null; currentVoterId?: string | null };
+    const secret = game.secret_state as { currentNominee?: string | null; currentVoterId?: string | null; nominationStage?: string | null };
     if (game.version !== parsed.data.expectedVersion) {
       if (retryableVote && secret.currentNominee === command.nomineeId) {
         // Vote choices are independent; reapply them to the latest nomination state.
@@ -89,6 +91,10 @@ export async function POST(
         return NextResponse.json({ version: game.version, superseded: true });
       } else if (retryableAdvance && secret.currentNominee === command.nomineeId && secret.currentVoterId === command.playerId) {
         // A vote changed the row while this same timed seat was waiting. Retry against it.
+      } else if (retryableNominationStage && secret.currentNominee === command.nomineeId && secret.nominationStage === command.stage) {
+        // Concurrent clients may request the same expired stage transition; retry it against this version.
+      } else if (retryableNominationStage && secret.currentNominee === command.nomineeId) {
+        return NextResponse.json({ version: game.version, superseded: true });
       } else {
         return NextResponse.json({ error: "The game changed. Your action may no longer be available.", currentVersion: game.version }, { status: 409 });
       }
@@ -98,6 +104,9 @@ export async function POST(
       return NextResponse.json({ error: "That nomination has already moved on.", currentVersion: game.version }, { status: 409 });
     }
     if (retryableAdvance && (secret.currentNominee !== command.nomineeId || secret.currentVoterId !== command.playerId)) {
+      return NextResponse.json({ version: game.version, superseded: true });
+    }
+    if (retryableNominationStage && (secret.currentNominee !== command.nomineeId || secret.nominationStage !== command.stage)) {
       return NextResponse.json({ version: game.version, superseded: true });
     }
 
@@ -120,7 +129,7 @@ export async function POST(
       };
     } catch (cause) {
       if (cause instanceof GameCommandError) {
-        if (retryableAdvance && cause.code === "VOTE_TIMER_ACTIVE") {
+        if ((retryableAdvance && cause.code === "VOTE_TIMER_ACTIVE") || (retryableNominationStage && cause.code === "NOMINATION_TIMER_ACTIVE")) {
           return NextResponse.json({ version: game.version, pending: true });
         }
         return NextResponse.json({ error: cause.message, code: cause.code }, { status: 400 });
@@ -152,7 +161,7 @@ export async function POST(
       return NextResponse.json({ version: result.current_version, duplicate: result.duplicate });
     }
 
-    if (!retryableVote && !retryableAdvance) {
+    if (!retryableVote && !retryableAdvance && !retryableNominationStage) {
       return NextResponse.json({ error: "The game changed. Refresh before trying that action again.", currentVersion: result.current_version }, { status: 409 });
     }
 

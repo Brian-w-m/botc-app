@@ -447,12 +447,12 @@ describe("Trouble Brewing character audit", () => {
     expect(() => troubleBrewing.applyCommand(asGame(secret), actor(secret.players[0]), { type: "VOTE", vote: true }, () => 0.4)).toThrow(/seat has already been passed/i);
   });
 
-  it("keeps a vote seat open until its two-second timer expires", () => {
+  it("keeps a vote seat open until its three-second timer expires", () => {
     const secret = makeGame(["washerwoman", "librarian", "imp", "baron", "saint"]);
     secret.phase = "day";
     secret.dayStage = "nominations";
     beginVote(secret, secret.players[2].id);
-    secret.voteTurnEndsAt = Date.now() + 2000;
+    secret.voteTurnEndsAt = Date.now() + 3000;
 
     expect(() => troubleBrewing.applyCommand(asGame(secret), actor(secret.players[1]), { type: "ADVANCE_VOTE" }, () => 0.4)).toThrow(/still being counted/i);
     secret.voteTurnEndsAt = Date.now() - 1;

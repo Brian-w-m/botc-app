@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { ArrowLeft, Bot, Check, Clipboard, LoaderCircle, LogOut, MoonStar, Plus, RefreshCw, UsersRound, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, Bot, Check, Clipboard, LoaderCircle, LogOut, MoonStar, Plus, RefreshCw, UsersRound, X } from "lucide-react";
 import JoinRoomForm from "@/components/JoinRoomForm";
 import RoleSprite from "@/components/RoleSprite";
 import { getBrowserSupabaseClient } from "@/lib/supabase/browser";
@@ -265,7 +265,9 @@ export default function RoomPage({ params }: { params: Promise<{ code: string }>
                   <div className="mt-5 rounded-xl border border-violet-200/10 bg-violet-300/[0.06] p-4">
                     <p className="text-sm font-medium text-violet-100">{lobby.game.phase === "finished" ? "Game finished" : "Game in progress"}</p>
                     <p className="mt-1 text-xs capitalize text-zinc-400">{lobby.game.phase === "finished" ? "The previous game is complete. The host can prepare the next game here." : `${lobby.game.phase} · Day ${lobby.game.dayNumber}`}</p>
-                    <Link href={`/room/${code}/play`} className="mt-3 inline-flex text-xs font-medium text-violet-200 underline decoration-violet-200/30 underline-offset-4">Open your private game view</Link>
+                    <Link href={`/room/${code}/play`} className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl bg-violet-300 px-4 py-3 text-zinc-950 transition hover:bg-violet-200">
+                      Open game <ArrowRight size={16} />
+                    </Link>
                   </div>
                 )}
               </div>

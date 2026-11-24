@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { ArrowLeft, LoaderCircle, MoonStar, Skull, UsersRound } from "lucide-react";
+import { ArrowLeft, BookOpen, LoaderCircle, MoonStar, Skull, UsersRound } from "lucide-react";
 import type { GameCommand, PlayerPrivateView, PublicGameView } from "@/domain/game/types";
 import RoleSprite from "@/components/RoleSprite";
 import { getBrowserSupabaseClient } from "@/lib/supabase/browser";
@@ -36,7 +36,9 @@ export default function PlayPage({ params }: { params: Promise<{ code: string }>
   const [actionId, setActionId] = useState("");
   const [clockNow, setClockNow] = useState(0);
   const autoOpenPending = useRef(false);
+  const nominationAdvancePending = useRef<string | null>(null);
   const voteAdvancePending = useRef<string | null>(null);
+  const lastNightVibration = useRef<string | null>(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -88,12 +90,13 @@ export default function PlayPage({ params }: { params: Promise<{ code: string }>
   useEffect(() => {
     if (!token) return;
     void refresh();
-    // A vote seat lasts only two seconds. Keep the live view fresh enough that
+    // A vote seat lasts three seconds. Keep the live view fresh enough that
     // players don't submit a hand change against a several-second-old snapshot.
-    const voting = Boolean(gameRead?.game?.publicState.currentNomination);
-    const timer = window.setInterval(() => void refresh(), voting ? 400 : 2500);
+    const publicState = gameRead?.game?.publicState;
+    const pollInterval = publicState?.nominationStage === "voting" ? 400 : publicState?.currentNomination ? 2000 : 2500;
+    const timer = window.setInterval(() => void refresh(), pollInterval);
     return () => window.clearInterval(timer);
-  }, [gameRead?.game?.publicState.currentNomination?.nomineeId, refresh, token]);
+  }, [gameRead?.game?.publicState.currentNomination?.nomineeId, gameRead?.game?.publicState.nominationStage, refresh, token]);
 
   useEffect(() => {
     if (!token || !code || !gameRead?.isHost || !gameRead.botActionPending) return;
@@ -110,17 +113,34 @@ export default function PlayPage({ params }: { params: Promise<{ code: string }>
     return () => window.clearInterval(timer);
   }, [code, gameRead?.botActionPending, gameRead?.isHost, refresh, token]);
 
+  useEffect(() => {
+    const game = gameRead?.game;
+    const actions = gameRead?.privateState?.actions.filter(action => action.command.type === "NIGHT_CHOOSE") ?? [];
+    if (!game || game.phase !== "night" || actions.length === 0) return;
+
+    const promptKey = `${game.id}:${game.dayNumber}:${actions.map(action => action.id).sort().join("|")}`;
+    if (lastNightVibration.current === promptKey) return;
+    lastNightVibration.current = promptKey;
+
+    // Vibration is a progressive enhancement; browsers without the API simply
+    // keep using the regular private action prompt.
+    if (typeof navigator !== "undefined" && "vibrate" in navigator) {
+      navigator.vibrate([250, 120, 250]);
+    }
+  }, [gameRead?.game?.dayNumber, gameRead?.game?.id, gameRead?.game?.phase, gameRead?.privateState?.actions]);
+
   const discussionDeadline = gameRead?.game?.publicState.discussionEndsAt ?? null;
+  const nominationDeadline = gameRead?.game?.publicState.nominationEndsAt ?? null;
   const voteTurnDeadline = gameRead?.game?.publicState.voteTurnEndsAt ?? null;
   useEffect(() => {
     if (gameRead?.game?.phase !== "day" || gameRead.game.publicState.dayStage !== "discussion") autoOpenPending.current = false;
   }, [discussionDeadline, gameRead?.game?.phase, gameRead?.game?.publicState.dayStage]);
   useEffect(() => {
-    if (!discussionDeadline && !voteTurnDeadline) return;
+    if (!discussionDeadline && !nominationDeadline && !voteTurnDeadline) return;
     setClockNow(Date.now());
     const timer = window.setInterval(() => setClockNow(Date.now()), 200);
     return () => window.clearInterval(timer);
-  }, [discussionDeadline, voteTurnDeadline]);
+  }, [discussionDeadline, nominationDeadline, voteTurnDeadline]);
 
   useEffect(() => {
     const game = gameRead?.game;
@@ -142,6 +162,44 @@ export default function PlayPage({ params }: { params: Promise<{ code: string }>
       setError("The nomination timer ended, but nominations could not open. Retrying…");
     });
   }, [code, discussionDeadline, gameRead?.game, refresh, token]);
+
+  useEffect(() => {
+    const game = gameRead?.game;
+    const nomination = game?.publicState.currentNomination;
+    const stage = game?.publicState.nominationStage;
+    if (!game || !token || !code || !nomination || !stage || !nominationDeadline) return;
+    const requestKey = `${game.id}:${nomination.nomineeId}:${stage}:${nominationDeadline}`;
+    const timer = window.setInterval(() => {
+      if (Date.now() < nominationDeadline || nominationAdvancePending.current === requestKey) return;
+      const latest = gameReadRef.current;
+      if (!latest?.game || latest.game.id !== game.id
+        || latest.game.publicState.currentNomination?.nomineeId !== nomination.nomineeId
+        || latest.game.publicState.nominationStage !== stage) return;
+      nominationAdvancePending.current = requestKey;
+      void fetch(`/api/rooms/${code}/game/commands`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          commandId: crypto.randomUUID(),
+          expectedVersion: latest.game.version,
+          command: { type: "ADVANCE_NOMINATION", nomineeId: nomination.nomineeId, stage }
+        })
+      }).then(async response => {
+        if (!response.ok) setError("The nomination timer could not advance. Refreshing the game…");
+        const result = await response.json();
+        await refresh(typeof result.version === "number" ? result.version : 0);
+        if (result.pending) window.setTimeout(() => {
+          if (nominationAdvancePending.current === requestKey) nominationAdvancePending.current = null;
+        }, 500);
+      }).catch(() => setError("The nomination timer could not advance. Retrying…"))
+        .finally(() => {
+          window.setTimeout(() => {
+            if (nominationAdvancePending.current === requestKey) nominationAdvancePending.current = null;
+          }, 500);
+        });
+    }, 100);
+    return () => window.clearInterval(timer);
+  }, [code, gameRead?.game, nominationDeadline, refresh, token]);
 
   useEffect(() => {
     const game = gameRead?.game;
@@ -248,16 +306,21 @@ export default function PlayPage({ params }: { params: Promise<{ code: string }>
   const game = gameRead?.game;
   const privateView = gameRead?.privateState;
   const publicView = game?.publicState;
-  const dayActions = game?.phase === "day" ? privateView?.actions.filter(action => action.command.type === "NOMINATE" || action.command.type === "VOTE" || action.command.type === "ADVANCE_VOTE" || action.command.type === "OPEN_NOMINATIONS" || action.command.type === "CLOSE_NOMINATIONS") ?? [] : [];
-  const roleActions = privateView?.actions.filter(action => action.command.type !== "NOMINATE" && action.command.type !== "VOTE" && action.command.type !== "ADVANCE_VOTE" && action.command.type !== "OPEN_NOMINATIONS" && action.command.type !== "CLOSE_NOMINATIONS") ?? [];
+  const dayActions = game?.phase === "day" ? privateView?.actions.filter(action => action.command.type === "NOMINATE" || action.command.type === "VOTE" || action.command.type === "ADVANCE_VOTE" || action.command.type === "ADVANCE_NOMINATION" || action.command.type === "OPEN_NOMINATIONS" || action.command.type === "CLOSE_NOMINATIONS") ?? [] : [];
+  const roleActions = privateView?.actions.filter(action => action.command.type !== "NOMINATE" && action.command.type !== "VOTE" && action.command.type !== "ADVANCE_VOTE" && action.command.type !== "ADVANCE_NOMINATION" && action.command.type !== "OPEN_NOMINATIONS" && action.command.type !== "CLOSE_NOMINATIONS") ?? [];
   const discussionSeconds = discussionDeadline ? Math.max(0, Math.ceil((discussionDeadline - clockNow) / 1000)) : 0;
   const discussionClock = `${Math.floor(discussionSeconds / 60)}:${String(discussionSeconds % 60).padStart(2, "0")}`;
+  const nominationSeconds = nominationDeadline ? Math.max(0, Math.ceil((nominationDeadline - clockNow) / 1000)) : 0;
+  const nominationClock = `${Math.floor(nominationSeconds / 60)}:${String(nominationSeconds % 60).padStart(2, "0")}`;
   const voteCountdownSeconds = voteTurnDeadline ? Math.max(0, Math.ceil((voteTurnDeadline - clockNow) / 1000)) : null;
 
   return (
     <main className="min-h-screen px-5 py-7 sm:px-8 sm:py-10">
       <div className="mx-auto max-w-4xl">
-        <Link href={`/room/${code}`} className="inline-flex items-center gap-2 text-sm text-zinc-500 transition hover:text-white"><ArrowLeft size={16} /> Room lobby</Link>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <Link href={`/room/${code}`} className="inline-flex items-center gap-2 text-sm text-zinc-500 transition hover:text-white"><ArrowLeft size={16} /> Room lobby</Link>
+          <Link href={`/room/${code}/script`} className="inline-flex items-center gap-2 rounded-lg border border-violet-200/15 bg-violet-300/[0.07] px-3 py-2 text-sm text-violet-100 transition hover:border-violet-200/30 hover:bg-violet-300/[0.12]"><BookOpen size={15} /> Script &amp; setup</Link>
+        </div>
 
         {!token ? (
           <section className="mt-12 rounded-3xl border border-white/10 bg-[#131720] p-8 text-center">
@@ -314,25 +377,20 @@ export default function PlayPage({ params }: { params: Promise<{ code: string }>
                   <h2 className="mt-4 text-xl font-semibold">{publicView?.headline || "The game is underway"}</h2>
                   <ul className="mt-4 divide-y divide-white/[0.06]">
                     {publicView?.players?.map(player => (
-                      <li key={player.id} className="flex items-center gap-3 py-3">
-                        <span className={`size-2 rounded-full ${player.alive ? "bg-emerald-300" : "bg-zinc-700"}`} />
-                        <span className={`text-sm ${player.alive ? "text-zinc-200" : "text-zinc-600 line-through"}`}>{player.displayName}</span>
-                        {!player.alive && <Skull className="ml-auto text-zinc-700" size={15} />}
-                        {player.hasGhostVote && !player.alive && <span className="ml-auto text-[10px] uppercase tracking-wider text-violet-200">Ghost vote</span>}
+                      <li key={player.id} aria-current={publicView?.highlightedPlayerId === player.id ? "true" : undefined} className={`grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 rounded-xl px-3 py-3 transition-all duration-300 ${publicView?.highlightedPlayerId === player.id ? "bg-amber-200/15 ring-1 ring-amber-200/70 shadow-[0_0_24px_rgba(253,230,138,0.14)]" : ""}`}>
+                        <div className="flex min-w-0 items-center gap-3">
+                          <span className="flex w-4 shrink-0 justify-center">{player.alive ? <span className="size-2 rounded-full bg-emerald-300" /> : <Skull className={`shrink-0 ${player.hasGhostVote ? "text-violet-200" : "text-zinc-600"}`} size={14} />}</span>
+                          <span className={`truncate text-sm ${player.alive ? "text-zinc-200" : player.hasGhostVote ? "text-violet-200 line-through" : "text-zinc-600 line-through"}`}>{player.displayName}</span>
+                        </div>
+                        <div className="flex justify-center">
+                          {publicView?.highlightedPlayerId === player.id && <span className="rounded-full bg-amber-100/15 px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-amber-100">{publicView?.nominationStage === "countdown" ? "Starting seat" : "Voting now"}</span>}
+                        </div>
+                        <div className="flex justify-end">
+                          {publicView?.currentNomination?.nomineeId === player.id ? <span className="text-right text-[10px] font-semibold uppercase tracking-wider text-amber-100 sm:text-xs">Nominated</span> : publicView?.executionBlock?.nomineeId === player.id ? <span className="text-right text-[10px] font-semibold uppercase tracking-wider text-rose-200 sm:text-xs">Marked execution</span> : null}
+                        </div>
                       </li>
                     ))}
                   </ul>
-                  {publicView?.currentNomination && (
-                    <div className="mt-4 rounded-xl border border-amber-200/10 bg-amber-200/[0.04] p-4">
-                      <p className="text-xs uppercase tracking-wider text-amber-100/70">Current nomination</p>
-                      <p className="mt-1 font-medium">{publicView.currentNomination.nomineeName}</p>
-                      <p className="mt-1 text-xs text-zinc-500">{publicView.currentNomination.votesFor} votes so far</p>
-                      {publicView.currentVoter && <p className="mt-2 text-xs text-amber-100/70">Voting proceeds clockwise, starting with the nominee. {publicView.currentVoter.displayName}’s seat passes in {voteCountdownSeconds ?? 2}s. Raise your hand before the sweep reaches you; a hand left down counts as no.</p>}
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        {publicView.currentNomination.ballots.map(ballot => <span key={ballot.playerId} className="rounded-full bg-emerald-300/10 px-2.5 py-1 text-xs text-emerald-200">{ballot.displayName}: Yes</span>)}
-                      </div>
-                    </div>
-                  )}
                   {publicView?.executionBlock && (
                     <div className="mt-4 rounded-xl border border-rose-200/15 bg-rose-200/[0.05] p-4" role="status">
                       <p className="text-xs uppercase tracking-wider text-rose-100/70">On the block</p>
@@ -343,25 +401,36 @@ export default function PlayPage({ params }: { params: Promise<{ code: string }>
                   {publicView?.executionBlockTied && (
                     <p className="mt-4 rounded-xl border border-amber-200/10 bg-amber-200/[0.04] p-4 text-sm text-amber-100/80">The leading nomination votes are tied. No one is currently on the block.</p>
                   )}
-                  {Boolean(publicView?.notices?.length) && (
-                    <section aria-label="This night and day log" aria-live="polite" className="mt-5 border-t border-white/[0.06] pt-4">
-                      <h3 className="text-xs font-medium tracking-[0.16em] text-zinc-500">THIS NIGHT &amp; DAY</h3>
-                      <ol className="mt-2 space-y-2">
-                        {publicView?.notices?.map((notice, index) => <li key={`${index}-${notice}`} className="text-sm leading-6 text-zinc-400">{notice}</li>)}
-                      </ol>
-                    </section>
-                  )}
                   {game.phase === "day" && (
                     <section className="mt-5 rounded-2xl border border-amber-200/15 bg-amber-200/[0.04] p-4">
                       <p className="text-xs font-medium tracking-[0.16em] text-amber-100/70">DAY ACTIONS</p>
-                      <h3 className="mt-2 text-lg font-semibold">{publicView?.dayStage === "discussion" ? `Discussion · ${discussionClock}` : publicView?.currentNomination ? `Vote on ${publicView.currentNomination.nomineeName}` : "Nominations are open"}</h3>
+                      <h3 className="mt-2 text-lg font-semibold">{publicView?.dayStage === "discussion" ? `Discussion · ${discussionClock}` : publicView?.nominationStage === "accusation" ? `Accusation · ${nominationClock}` : publicView?.nominationStage === "defense" ? `Defence · ${nominationClock}` : publicView?.nominationStage === "countdown" ? `Vote begins · 0:${String(nominationSeconds).padStart(2, "0")}` : publicView?.nominationStage === "voting" ? `Vote on ${publicView.currentNomination?.nomineeName} · ${voteCountdownSeconds ?? 2}s` : publicView?.currentNomination ? `Nomination · ${nominationClock}` : "Nominations are open"}</h3>
                       {publicView?.dayStage !== "discussion" && publicView?.votesRequiredForBlock !== undefined && <p className="mt-1 text-xs text-amber-100/70">{publicView.votesRequiredForBlock} votes from {publicView.livingPlayerCount} living {publicView.livingPlayerCount === 1 ? "player" : "players"} are needed to get on the block.</p>}
+                      {publicView?.currentNomination && (
+                        <div className="mt-3 rounded-xl border border-amber-200/10 bg-black/10 p-3">
+                          <p className="text-xs uppercase tracking-wider text-amber-100/70">Current nomination</p>
+                          <p className="mt-1 font-medium">{publicView.currentNomination.nomineeName}{publicView.currentNomination.nominatorName && <span className="text-xs font-normal text-zinc-400"> · nominated by {publicView.currentNomination.nominatorName}</span>}{publicView.nominationStage === "voting" && <span className="text-xs font-normal text-zinc-400"> · {publicView.currentNomination.votesFor} yes</span>}</p>
+                          {publicView.nominationStage === "accusation" && <p className="mt-2 text-xs leading-5 text-amber-100/70">{publicView.currentNomination.nominatorName ?? "The nominator"} has one minute to make their accusation.</p>}
+                          {publicView.nominationStage === "defense" && <p className="mt-2 text-xs leading-5 text-amber-100/70">{publicView.currentNomination.nomineeName} has one minute to defend.</p>}
+                          {publicView.nominationStage === "countdown" && <p className="mt-2 text-xs leading-5 text-amber-100/70">Voting starts when the countdown ends. The highlighted seat begins the clockwise vote sweep.</p>}
+                          {publicView.nominationStage === "voting" && publicView.currentVoter && <p className="mt-2 text-xs leading-5 text-amber-100/70">Voting proceeds clockwise, starting with the nominee. {publicView.currentVoter.displayName}’s highlighted seat passes in {voteCountdownSeconds ?? 3}s. Raise your hand before the sweep reaches you; a hand left down counts as no.</p>}
+                          {publicView.currentNomination.ballots.length > 0 && <div className="mt-2 flex flex-wrap gap-2">{publicView.currentNomination.ballots.map(ballot => <span key={ballot.playerId} className="rounded-full bg-emerald-300/10 px-2.5 py-1 text-xs text-emerald-200">{ballot.displayName}: Yes</span>)}</div>}
+                        </div>
+                      )}
                       <p className="mt-1 text-sm leading-6 text-zinc-400">{privateView?.prompt ?? (publicView?.currentNomination ? "Vote on the open nomination before another one begins." : "You cannot nominate while dead. Wait for an alive player to make a nomination.")}</p>
                       {dayActions.length > 0 ? (
                         <div className="mt-3 grid gap-2 sm:grid-cols-2">
                           {dayActions.map(action => <button key={action.id} onClick={() => void sendAction(action)} disabled={Boolean(actionId)} className="rounded-xl border border-white/10 bg-white/[0.05] px-3 py-2.5 text-left text-sm text-zinc-200 transition hover:border-amber-100/20 hover:bg-amber-100/[0.08] disabled:opacity-50">{action.label}</button>)}
                         </div>
                       ) : <p className="mt-3 text-xs text-zinc-500">{publicView?.currentNomination ? "No button is needed for a no vote. If your hand is down when the host passes your seat, it counts as no." : "You may have already nominated today. Nominations can also be unavailable while a vote is open."}</p>}
+                    </section>
+                  )}
+                  {Boolean(publicView?.notices?.length) && (
+                    <section aria-label="This night and day log" aria-live="polite" className="mt-5 border-t border-white/[0.06] pt-4">
+                      <h3 className="text-xs font-medium tracking-[0.16em] text-zinc-500">THIS NIGHT &amp; DAY</h3>
+                      <ol className="mt-2 space-y-2">
+                        {publicView?.notices?.map((notice, index) => <li key={`${index}-${notice}`} className="text-sm leading-6 text-zinc-400">{notice.includes(" nominated ") ? <strong className="font-semibold text-zinc-200">{notice}</strong> : notice}</li>)}
+                      </ol>
                     </section>
                   )}
                 </article>

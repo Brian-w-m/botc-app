@@ -11,6 +11,10 @@ export interface GameParticipant {
 export interface PublicGameView {
   headline: string;
   dayStage?: "discussion" | "nominations" | null;
+  nominationStage?: "accusation" | "defense" | "countdown" | "voting" | null;
+  nominationEndsAt?: number | null;
+  voteStartsAt?: number | null;
+  highlightedPlayerId?: string | null;
   discussionEndsAt?: number | null;
   players: Array<{
     id: string;
@@ -18,7 +22,7 @@ export interface PublicGameView {
     alive: boolean;
     hasGhostVote: boolean;
   }>;
-  currentNomination: { nomineeId: string; nomineeName: string; votesFor: number; ballots: Array<{ playerId: string; displayName: string; vote: boolean }> } | null;
+  currentNomination: { nomineeId: string; nomineeName: string; nominatorName?: string; votesFor: number; ballots: Array<{ playerId: string; displayName: string; vote: boolean }> } | null;
   currentVoter?: { playerId: string; displayName: string } | null;
   voteTurnEndsAt?: number | null;
   executionBlock?: { nomineeId: string; nomineeName: string; votes: number } | null;

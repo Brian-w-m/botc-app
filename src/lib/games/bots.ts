@@ -7,6 +7,7 @@ type BotState = {
   current: { playerId: string } | null;
   currentNominee: string | null;
   currentVoterId?: string | null;
+  nominationStage?: string | null;
   order?: string[];
   voteOrder?: string[];
   voteChoices?: Record<string, string>;
@@ -42,6 +43,7 @@ function nextBot(game: AuthoritativeGameState) {
   }
   if (internal.phase !== "day") return null;
   if (internal.currentNominee) {
+    if (internal.nominationStage && internal.nominationStage !== "voting") return null;
     const currentVoterId = currentVotePlayerId(internal);
     const bot = bots.find(player => player.id === currentVoterId && !internal.botVotesDecided?.includes(player.id) && (player.alive || player.ghostVote));
     return bot ? { bot, mode: "vote" as const } : null;
