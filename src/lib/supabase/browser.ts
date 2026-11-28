@@ -10,7 +10,7 @@ export function getBrowserSupabaseClient() {
   const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
   if (!url || !anonKey) return (browserClient = null);
   browserClient = createClient(url, anonKey, {
-    auth: { autoRefreshToken: false, persistSession: false }
+    auth: { autoRefreshToken: false, persistSession: false },
   });
   return browserClient;
 }

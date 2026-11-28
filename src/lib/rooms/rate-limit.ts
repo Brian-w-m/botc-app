@@ -8,10 +8,12 @@ export async function consumeRateLimit(
   supabase: SupabaseClient,
   scope: string,
   limit: number,
-  windowSeconds: number
+  windowSeconds: number,
 ) {
   // Vercel supplies this proxy-controlled header. Unknown local IPs share one bucket.
-  const clientAddress = request.headers.get("x-vercel-forwarded-for")?.split(",")[0]?.trim() || "unknown";
+  const clientAddress =
+    request.headers.get("x-vercel-forwarded-for")?.split(",")[0]?.trim() ||
+    "unknown";
   const bucketKey = createHash("sha256")
     .update(`${scope}\0${clientAddress}`)
     .digest("hex");
@@ -19,7 +21,7 @@ export async function consumeRateLimit(
   const { data, error } = await supabase.rpc("consume_rate_limit", {
     p_bucket_key: bucketKey,
     p_limit: limit,
-    p_window_seconds: windowSeconds
+    p_window_seconds: windowSeconds,
   });
   if (error) {
     logSupabaseError("Rate limit check failed", error);
@@ -29,6 +31,6 @@ export async function consumeRateLimit(
   return {
     allowed: result?.allowed === true,
     unavailable: false,
-    retryAfterSeconds: Number(result?.retry_after_seconds ?? 0)
+    retryAfterSeconds: Number(result?.retry_after_seconds ?? 0),
   };
 }

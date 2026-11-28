@@ -3,20 +3,24 @@
 A mobile-first foundation for a digital tabletop Storyteller.
 
 ## Requirements
+
 - Node.js 20+
 - A Supabase project (optional for the local UI and pure engine tests)
 
 ## Run locally
+
 ```bash
 npm install
 cp .env.example .env.local
 npm run dev
 ```
+
 Open http://localhost:3000. The landing page and game-engine unit tests work without
 Supabase credentials. The create-room API returns a clear configuration error until
 Supabase is configured.
 
 ## Checks
+
 ```bash
 npm test
 npm run typecheck
@@ -25,6 +29,7 @@ npm run build
 ```
 
 ## Supabase setup
+
 1. Create a Supabase project.
 2. Apply `supabase/migrations/0001_initial.sql` through `0007_game_history.sql` in order using the Supabase SQL editor or CLI.
 3. Copy the project URL and anon/publishable key into `.env.local` for public room change notifications.
@@ -48,12 +53,14 @@ Each bot independently has one 50% chance per day to nominate a random legal tar
 commands are resolved server-side like player commands.
 
 ## Deploy to Vercel
+
 Import this repository into Vercel, set the three environment variables, and deploy.
 The app uses Next.js Route Handlers. Supabase Realtime is the intended delivery layer
 for live updates; do not attempt to host a long-lived WebSocket server inside a
 Vercel Function.
 
 ## Architecture
+
 - `src/domain`: pure TypeScript game state and transition logic, independent of Next.js.
 - `src/app/api`: server-side command boundary.
 - `src/lib/supabase`: server-only Supabase client.
@@ -70,6 +77,7 @@ requesting player’s private view. Never publish authoritative state or private
 a shared Realtime channel.
 
 ## Security work required before production
+
 - Add CAPTCHA and operational monitoring before exposing room creation publicly.
 - Add account authentication only if identities must persist across games or devices.
 - Review rate-limit trust boundaries against the deployment proxy and tune limits after playtests.

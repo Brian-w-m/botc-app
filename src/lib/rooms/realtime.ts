@@ -6,10 +6,10 @@ import { logSupabaseError } from "@/lib/rooms/session";
 export async function publishRoomVersion(
   supabase: SupabaseClient,
   roomId: string,
-  revision: number
+  revision: number,
 ) {
   const channel = supabase.channel(`room:${roomId}`, {
-    config: { broadcast: { self: false, ack: true } }
+    config: { broadcast: { self: false, ack: true } },
   });
   try {
     let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -17,16 +17,30 @@ export async function publishRoomVersion(
       channel.send({
         type: "broadcast",
         event: "room_state_changed",
-        payload: { revision }
+        payload: { revision },
       }),
-      new Promise<"timed out">(resolve => {
+      new Promise<"timed out">((resolve) => {
         timeout = setTimeout(() => resolve("timed out"), 1500);
-      })
-    ]).finally(() => { if (timeout) clearTimeout(timeout); });
-    if (result !== "ok") console.warn("Room version broadcast was not confirmed", { roomId, result });
+      }),
+    ]).finally(() => {
+      if (timeout) clearTimeout(timeout);
+    });
+    if (result !== "ok")
+      console.warn("Room version broadcast was not confirmed", {
+        roomId,
+        result,
+      });
   } catch (cause) {
     if (cause && typeof cause === "object" && "message" in cause) {
-      logSupabaseError("Room version broadcast failed", cause as { message: string; code?: string; details?: string | null; hint?: string | null });
+      logSupabaseError(
+        "Room version broadcast failed",
+        cause as {
+          message: string;
+          code?: string;
+          details?: string | null;
+          hint?: string | null;
+        },
+      );
     } else {
       console.warn("Room version broadcast failed", { roomId });
     }

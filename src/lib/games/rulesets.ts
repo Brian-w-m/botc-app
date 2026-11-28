@@ -11,7 +11,9 @@ for (const ruleset of installedRulesets) {
 export function registerRuleset(ruleset: GameRuleset) {
   const current = rulesets.get(ruleset.id);
   if (current && current.version !== ruleset.version) {
-    throw new Error(`Ruleset ${ruleset.id} is already registered at version ${current.version}.`);
+    throw new Error(
+      `Ruleset ${ruleset.id} is already registered at version ${current.version}.`,
+    );
   }
   rulesets.set(ruleset.id, ruleset);
 }

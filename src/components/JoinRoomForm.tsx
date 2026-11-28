@@ -2,14 +2,20 @@
 
 import { useEffect, useState } from "react";
 import { ArrowRight, LoaderCircle, UsersRound } from "lucide-react";
-import { getNamedPlayerSession, rememberPlayerSession } from "@/lib/rooms/client-session";
+import {
+  getNamedPlayerSession,
+  rememberPlayerSession,
+} from "@/lib/rooms/client-session";
 
 type JoinRoomFormProps = {
   initialCode?: string;
   onJoined?: (code: string) => void;
 };
 
-export default function JoinRoomForm({ initialCode = "", onJoined }: JoinRoomFormProps) {
+export default function JoinRoomForm({
+  initialCode = "",
+  onJoined,
+}: JoinRoomFormProps) {
   const [code, setCode] = useState(initialCode.toUpperCase());
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
@@ -41,7 +47,7 @@ export default function JoinRoomForm({ initialCode = "", onJoined }: JoinRoomFor
       const response = await fetch(`/api/rooms/${normalizedCode}/players`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ displayName: name })
+        body: JSON.stringify({ displayName: name }),
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error ?? "Unable to join room.");
@@ -50,7 +56,9 @@ export default function JoinRoomForm({ initialCode = "", onJoined }: JoinRoomFor
       if (onJoined) onJoined(normalizedCode);
       else window.location.assign(`/room/${normalizedCode}`);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Something went wrong.");
+      setError(
+        cause instanceof Error ? cause.message : "Something went wrong.",
+      );
     } finally {
       setBusy(false);
     }
@@ -58,11 +66,20 @@ export default function JoinRoomForm({ initialCode = "", onJoined }: JoinRoomFor
 
   return (
     <form onSubmit={joinRoom} className="space-y-4">
-      <label className="block text-sm text-zinc-300" htmlFor="roomCode">Room code</label>
+      <label className="block text-sm text-zinc-300" htmlFor="roomCode">
+        Room code
+      </label>
       <input
         id="roomCode"
         value={code}
-        onChange={event => setCode(event.target.value.toUpperCase().replace(/[^A-HJ-NP-Z2-9]/g, "").slice(0, 6))}
+        onChange={(event) =>
+          setCode(
+            event.target.value
+              .toUpperCase()
+              .replace(/[^A-HJ-NP-Z2-9]/g, "")
+              .slice(0, 6),
+          )
+        }
         autoCapitalize="characters"
         autoComplete="off"
         maxLength={6}
@@ -71,24 +88,41 @@ export default function JoinRoomForm({ initialCode = "", onJoined }: JoinRoomFor
         placeholder="E.G. 7KQ2MP"
         className="w-full rounded-xl border border-white/10 bg-black/20 px-4 py-3.5 font-mono tracking-[0.2em] outline-none placeholder:text-zinc-700 focus:border-violet-300/60"
       />
-      <label className="block text-sm text-zinc-300" htmlFor="displayName">Your display name</label>
+      <label className="block text-sm text-zinc-300" htmlFor="displayName">
+        Your display name
+      </label>
       <input
         id="displayName"
         value={name}
-        onChange={event => setName(event.target.value)}
+        onChange={(event) => setName(event.target.value)}
         maxLength={24}
         minLength={2}
         required
         placeholder="e.g. Alex"
         className="w-full rounded-xl border border-white/10 bg-black/20 px-4 py-3.5 outline-none placeholder:text-zinc-700 focus:border-violet-300/60"
       />
-      {reconnectAvailable && <p className="text-xs text-emerald-200">A saved seat for this name was found on this browser. You can resume it.</p>}
-      {error && <p role="alert" className="text-sm text-rose-300">{error}</p>}
+      {reconnectAvailable && (
+        <p className="text-xs text-emerald-200">
+          A saved seat for this name was found on this browser. You can resume
+          it.
+        </p>
+      )}
+      {error && (
+        <p role="alert" className="text-sm text-rose-300">
+          {error}
+        </p>
+      )}
       <button
         disabled={busy || code.length !== 6 || name.trim().length < 2}
         className="flex w-full items-center justify-center gap-2 rounded-xl bg-violet-300 px-5 py-3.5 font-semibold text-zinc-950 transition hover:bg-violet-200 disabled:cursor-not-allowed disabled:opacity-50"
       >
-        {busy ? <LoaderCircle className="animate-spin" size={17} /> : onJoined ? <UsersRound size={17} /> : <ArrowRight size={17} />}
+        {busy ? (
+          <LoaderCircle className="animate-spin" size={17} />
+        ) : onJoined ? (
+          <UsersRound size={17} />
+        ) : (
+          <ArrowRight size={17} />
+        )}
         {reconnectAvailable ? "Resume seat" : "Join room"}
       </button>
     </form>

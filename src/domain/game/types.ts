@@ -1,4 +1,5 @@
-export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+export type JsonValue =
+  string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 export type GamePhase = "setup" | "night" | "day" | "finished";
 
 export interface GameParticipant {
@@ -22,10 +23,20 @@ export interface PublicGameView {
     alive: boolean;
     hasGhostVote: boolean;
   }>;
-  currentNomination: { nomineeId: string; nomineeName: string; nominatorName?: string; votesFor: number; ballots: Array<{ playerId: string; displayName: string; vote: boolean }> } | null;
+  currentNomination: {
+    nomineeId: string;
+    nomineeName: string;
+    nominatorName?: string;
+    votesFor: number;
+    ballots: Array<{ playerId: string; displayName: string; vote: boolean }>;
+  } | null;
   currentVoter?: { playerId: string; displayName: string } | null;
   voteTurnEndsAt?: number | null;
-  executionBlock?: { nomineeId: string; nomineeName: string; votes: number } | null;
+  executionBlock?: {
+    nomineeId: string;
+    nomineeName: string;
+    votes: number;
+  } | null;
   executionBlockTied?: boolean;
   livingPlayerCount?: number;
   votesRequiredForBlock?: number;
@@ -69,7 +80,7 @@ export interface GameTransition {
 export class GameCommandError extends Error {
   constructor(
     public readonly code: string,
-    message: string
+    message: string,
   ) {
     super(message);
     this.name = "GameCommandError";
@@ -87,14 +98,17 @@ export interface GameRuleset {
   maxPlayers: number;
   createInitialState(
     participants: GameParticipant[],
-    random: () => number
+    random: () => number,
   ): AuthoritativeGameState;
   applyCommand(
     state: AuthoritativeGameState,
     actor: GameParticipant,
     command: GameCommand,
-    random: () => number
+    random: () => number,
   ): GameTransition;
   projectPublicState(secretState: JsonValue): JsonValue;
-  projectPrivateState(secretState: JsonValue, playerId: string): PlayerPrivateView | null;
+  projectPrivateState(
+    secretState: JsonValue,
+    playerId: string,
+  ): PlayerPrivateView | null;
 }

@@ -1,167 +1,1604 @@
-import type { AuthoritativeGameState, GameCommand, GameRuleset, GameTransition, JsonValue, PlayerPrivateView, PublicGameView } from "@/domain/game/types";
+import type {
+  AuthoritativeGameState,
+  GameCommand,
+  GameRuleset,
+  GameTransition,
+  JsonValue,
+  PlayerPrivateView,
+  PublicGameView,
+} from "@/domain/game/types";
 import { GameCommandError } from "@/domain/game/types";
 
 type Team = "Townsfolk" | "Outsider" | "Minion" | "Demon";
-export type TroubleBrewingRole = { id: string; name: string; team: Team; ability: string; first?: boolean; repeat?: boolean; once?: boolean };
-const roles: TroubleBrewingRole[] = [
-  { id:"washerwoman", name:"Washerwoman", team:"Townsfolk", ability:"At the start, learn two players; one is a named Townsfolk.", first:true },
-  { id:"librarian", name:"Librarian", team:"Townsfolk", ability:"At the start, learn two players; one is a named Outsider (or learn that none are in play).", first:true },
-  { id:"investigator", name:"Investigator", team:"Townsfolk", ability:"At the start, learn two players; one is a named Minion.", first:true },
-  { id:"chef", name:"Chef", team:"Townsfolk", ability:"At the start, learn how many neighboring pairs of evil players there are.", first:true },
-  { id:"empath", name:"Empath", team:"Townsfolk", ability:"Each night, learn how many alive neighbors are evil.", repeat:true },
-  { id:"fortune-teller", name:"Fortune Teller", team:"Townsfolk", ability:"Each night, choose two players; learn whether either is the Demon or your red herring.", repeat:true },
-  { id:"undertaker", name:"Undertaker", team:"Townsfolk", ability:"After an execution, learn that player's character that night.", repeat:true },
-  { id:"monk", name:"Monk", team:"Townsfolk", ability:"Each night after the first, protect a player from the Demon.", repeat:true },
-  { id:"ravenkeeper", name:"Ravenkeeper", team:"Townsfolk", ability:"If killed at night, choose a player and learn their character.", repeat:true },
-  { id:"virgin", name:"Virgin", team:"Townsfolk", ability:"The first Townsfolk to nominate you is executed immediately.", once:true },
-  { id:"slayer", name:"Slayer", team:"Townsfolk", ability:"Once per game during the day, publicly choose a player; the Demon dies if chosen.", once:true },
-  { id:"soldier", name:"Soldier", team:"Townsfolk", ability:"The Demon cannot kill you at night." },
-  { id:"mayor", name:"Mayor", team:"Townsfolk", ability:"If only three live and no execution occurs, good may win; a Demon attack may redirect." },
-  { id:"butler", name:"Butler", team:"Outsider", ability:"Each night choose a player; you may vote only when they vote.", repeat:true },
-  { id:"drunk", name:"Drunk", team:"Outsider", ability:"You believe you are a Townsfolk character, but your ability does not work." },
-  { id:"recluse", name:"Recluse", team:"Outsider", ability:"The game may treat you as evil or as a Minion or Demon for detection." },
-  { id:"saint", name:"Saint", team:"Outsider", ability:"If executed, evil wins." },
-  { id:"poisoner", name:"Poisoner", team:"Minion", ability:"Each night choose a player; their ability fails until tomorrow night.", repeat:true },
-  { id:"spy", name:"Spy", team:"Minion", ability:"Each night see the full Grimoire; the game may treat you as good or as a Townsfolk/Outsider." },
-  { id:"baron", name:"Baron", team:"Minion", ability:"Two additional Outsiders replace two Townsfolk in setup." },
-  { id:"scarlet-woman", name:"Scarlet Woman", team:"Minion", ability:"If the Demon dies with at least five alive, become the Demon." },
-  { id:"imp", name:"Imp", team:"Demon", ability:"Each night choose a player to kill. You may choose yourself to pass the Demon role to a Minion." , repeat:true },
-];
-const roleMap = Object.fromEntries(roles.map(r => [r.id, r])) as Record<string, TroubleBrewingRole>;
-const byTeam = (team: Team) => roles.filter(r => r.team === team).map(r => r.id);
-const shuffle=<T,>(values:T[],r:()=>number)=>{const result=[...values];for(let i=result.length-1;i>0;i--){const j=Math.floor(r()*(i+1));[result[i],result[j]]=[result[j],result[i]];}return result;};
-export const troubleBrewingRoles = roles;
-export const troubleBrewingSetupCounts: Record<number, [number,number,number,number]> = {5:[3,0,1,1],6:[3,1,1,1],7:[5,0,1,1],8:[5,1,1,1],9:[5,2,1,1],10:[7,0,2,1],11:[7,1,2,1],12:[7,2,2,1],13:[9,0,3,1],14:[9,1,3,1],15:[9,2,3,1]};
-const counts = troubleBrewingSetupCounts;
-type P = { id:string; name:string; isHost:boolean; isBot:boolean; alive:boolean; role:string; realRole:string; team:Team; drunkAs?:string; poisoned:boolean; poisonedBy?:string; onceUsed:boolean; ghostVote:boolean; info:string[]; redHerring:boolean };
-type Task = { playerId:string; kind:string };
-type S = { players:P[]; order:string[]; day:number; phase:"night"|"day"|"finished"; dayStage:"discussion"|"nominations"|null; nominationStage:"accusation"|"defense"|"countdown"|"voting"|null; nominationEndsAt:number|null; discussionEndsAt:number|null; voteTurnEndsAt:number|null; firstNight:boolean; queue:Task[]; current:Task|null; attackResolved:boolean; nightDeaths:string[]; newDemonIds:string[]; nightPicks:Record<string,string[]>; priorExecution:string|null; executedToday:boolean; nominations:string[]; nominationResults:Array<{nomineeId:string;votes:number}>; executionBlock:string|null; executionBlockVotes:number; executionBlockTied:boolean; nominatedBy:string[]; botNominationsDecided:string[]; botVotesDecided:string[]; votes:Record<string,boolean>; voteChoices:Record<string,"yes"|"no"|"abstain">; voteOrder:string[]; voteCursor:number; currentVoterId:string|null; currentNominee:string|null; nominationCursor:string|null; nominationUsed:boolean; virginSpent:boolean; notices:string[]; winner:string|null; demonBluffs:string[] };
-const makePublic = (s:S): PublicGameView => {const currentVoterId=nextVotePlayerId(s);return ({ headline:s.winner ? `${s.winner} wins` : s.phase === "night" ? (s.day===0 ? "The first night begins" : `Night ${s.day} falls`) : `Day ${s.day}: discuss, nominate, and vote`, dayStage:s.phase==="day"?(s.dayStage??"nominations"):null,nominationStage:s.phase==="day"?(s.nominationStage??(s.currentNominee?"voting":null)):null,nominationEndsAt:s.phase==="day"&&s.currentNominee?s.nominationEndsAt:null,voteStartsAt:s.phase==="day"&&(s.nominationStage??(s.currentNominee?"voting":null))==="countdown"?s.nominationEndsAt:null,highlightedPlayerId:(s.nominationStage??(s.currentNominee?"voting":null))==="countdown"?s.currentNominee:(s.nominationStage??(s.currentNominee?"voting":null))==="voting"?currentVoterId:null,discussionEndsAt:s.phase==="day"&&s.dayStage==="discussion"?s.discussionEndsAt:null,voteTurnEndsAt:s.phase==="day"&&s.currentNominee&&(s.nominationStage??"voting")==="voting"?(s.voteTurnEndsAt??0):null,players:bySeatingOrder(s).map(p=>({id:p.id,displayName:p.name,alive:p.alive||(s.phase==="night"&&s.nightDeaths.includes(p.name)),hasGhostVote:p.ghostVote})), livingPlayerCount:alive(s).length,votesRequiredForBlock:Math.ceil(alive(s).length/2),currentNomination:s.currentNominee ? {nomineeId:s.currentNominee,nomineeName:s.players.find(p=>p.id===s.currentNominee)?.name??"",nominatorName:s.players.find(p=>p.id===s.nominationCursor)?.name??"",votesFor:Object.values(s.votes).filter(Boolean).length,ballots:Object.entries(s.votes).filter(([,vote])=>vote).map(([playerId])=>({playerId,displayName:s.players.find(p=>p.id===playerId)?.name??"",vote:true}))} : null,currentVoter:(s.nominationStage??(s.currentNominee?"voting":null))==="voting"&&currentVoterId?{playerId:currentVoterId,displayName:s.players.find(p=>p.id===currentVoterId)?.name??""}:null, executionBlock:s.executionBlock?{nomineeId:s.executionBlock,nomineeName:s.players.find(p=>p.id===s.executionBlock)?.name??"",votes:s.executionBlockVotes}:null,executionBlockTied:s.executionBlockTied, notices:s.notices.filter(notice=>!/\bvoted (yes|no) on\b/i.test(notice)&&!/^The accusation ends\. The nominee has one minute to defend\.$|^The defence ends\. Voting begins after the five-second countdown\.$|^The vote sweep begins with the nominee and proceeds clockwise\.$/.test(notice)), ...(s.phase==="finished"?{revealedRoles:s.players.map(p=>({playerId:p.id,displayName:p.name,roleName:roleMap[p.realRole].name,team:p.team,alive:p.alive,...(p.realRole==="drunk"&&p.drunkAs?{believedAs:roleMap[p.drunkAs].name}:{})}))}:{}) });};
-const state = (s:S):AuthoritativeGameState => ({phase:s.phase,dayNumber:s.day,publicState:makePublic(s) as unknown as JsonValue,secretState:s as unknown as JsonValue});
-function fail(code:string,msg:string):never { throw new GameCommandError(code,msg); }
-const pick=<T,>(arr:T[],r:()=>number)=>arr[Math.floor(r()*arr.length)];
-const alive=(s:S)=>s.players.filter(p=>p.alive);
-const bySeatingOrder=(s:S)=>s.order.map(id=>s.players.find(p=>p.id===id)).filter((p):p is P=>Boolean(p));
-function voteOrder(s:S){if(s.voteOrder?.length)return s.voteOrder;if(!s.currentNominee)return[];const nomineeSeat=s.order.indexOf(s.currentNominee);return s.order.slice(nomineeSeat).concat(s.order.slice(0,nomineeSeat));}
-function voteChoices(s:S){return s.voteChoices??Object.fromEntries(Object.entries(s.votes??{}).map(([id,vote])=>[id,vote?"yes":"no"]));}
-function nextVotePlayerId(s:S){if(s.currentVoterId)return s.currentVoterId;return voteOrder(s).find((id,index)=>{const voter=s.players.find(player=>player.id===id);return Boolean(index>=(s.voteCursor??0)&&voter&&!Object.hasOwn(voteChoices(s),id)&&(voter.alive||voter.ghostVote));})??null;}
-function advanceVoteCursor(s:S){const order=voteOrder(s);s.voteCursor??=0;while(s.voteCursor<order.length){const id=order[s.voteCursor];const voter=s.players.find(player=>player.id===id);if(!voter||(!voter.alive&&!voter.ghostVote)){s.voteCursor++;continue;}s.currentVoterId=id;return;}s.currentVoterId=null;}
-function settleVote(s:S,targetId:string){const target=s.players.find(player=>player.id===targetId);if(!target)return;const yes=Object.values(s.votes).filter(Boolean).length;const threshold=Math.ceil(alive(s).length/2);s.nominationResults.push({nomineeId:target.id,votes:yes});const qualifying=s.nominationResults.filter(result=>result.votes>=threshold);const highest=qualifying.reduce((max,result)=>Math.max(max,result.votes),0);const leaders=qualifying.filter(result=>result.votes===highest);s.executionBlockVotes=highest;s.executionBlockTied=leaders.length>1;s.executionBlock=leaders.length===1?leaders[0].nomineeId:null;if(!target.alive)s.notices.push(`${target.name} is already dead and cannot be executed.`);else if(yes<threshold)s.notices.push(`${target.name} received ${yes} votes; ${threshold} are needed to get on the block.`);else if(s.executionBlockTied)s.notices.push(`The vote is tied at ${highest}. No one is currently on the block.`);else{const nominee=s.players.find(player=>player.id===s.executionBlock)!;s.notices.push(`${nominee.name} is on the block with ${highest} votes.`);}s.currentNominee=null;s.nominationStage=null;s.nominationEndsAt=null;s.currentVoterId=null;s.votes={};s.voteChoices={};s.voteOrder=[];s.voteCursor=0;s.voteTurnEndsAt=null;s.botVotesDecided=[];}
-const neighbors=(s:S,p:P):[P,P]=>{const ix=s.order.indexOf(p.id);const find=(direction:1|-1)=>{for(let d=1;d<s.order.length;d++){const q=s.players.find(x=>x.id===s.order[(ix+direction*d+s.order.length)%s.order.length]);if(q?.alive)return q;}return p;};return[find(-1),find(1)];};
-const eligibleEvil=(p:P)=>p.team==="Minion"||p.team==="Demon";
-const apparentRole=(p:P)=>p.realRole==="drunk"?p.role:p.realRole;
-const abilityWorks=(p:P)=>p.realRole!=="drunk"&&!p.poisoned;
-const registersAs=(p:P,team:Team,r:()=>number)=>p.realRole==="recluse"?(team==="Minion"||team==="Demon"?r()<.5:team==="Outsider"?r()>=.5:false):p.realRole==="spy"?(team==="Minion"?r()>=.25:(team==="Townsfolk"||team==="Outsider")&&r()<.25):p.team===team;
-const registersEvil=(p:P,r:()=>number)=>p.realRole==="recluse"?r()<.5:p.realRole==="spy"?r()>=.25:eligibleEvil(p);
-function removeLastInfo(info:string[],matches:(value:string)=>boolean){for(let i=info.length-1;i>=0;i--)if(matches(info[i])){info.splice(i,1);return;}}
-const makeInfo=(s:S,p:P,kind:string,r:()=>number)=>{
- const ring=s.order.map(id=>s.players.find(x=>x.id===id)!);
- const evil=(x:P)=>registersEvil(x,r);
- if(!abilityWorks(p)){
-  if(kind==="chef"){const n=Math.floor(r()*3);return `You sense ${n} neighboring evil pair${n===1?"":"s"}.`;}
-  const candidates=s.players.filter(x=>x.id!==p.id);
-  const target=pick(candidates,r),other=pick(candidates.filter(x=>x.id!==target.id),r),team:Team=kind==="washerwoman"?"Townsfolk":kind==="librarian"?"Outsider":"Minion";
-  const shown=pick(byTeam(team),r);
-  return `One of ${target.name} or ${other.name} is the ${roleMap[shown].name}.`;
- }
- if(kind==="washerwoman"||kind==="librarian"||kind==="investigator"){
-  const targetTeam:Team=kind==="washerwoman"?"Townsfolk":kind==="librarian"?"Outsider":"Minion";
-  const possibleTargets=s.players.filter(x=>x.id!==p.id);
-  const target=possibleTargets.find(x=>registersAs(x,targetTeam,r));
-  if(!target)return `${kind==="librarian"?"No Outsiders are in play.":"No information is available."}`;
-  const decoys=possibleTargets.filter(x=>x.id!==target.id&&x.alive); const other=decoys.length?pick(decoys,r):target;
-  let shown=target.realRole;
-  if(target.realRole==="recluse")shown=pick(byTeam(targetTeam),r);
-  if(target.realRole==="spy")shown=pick(byTeam(targetTeam),r);
-  return `One of ${target.name} or ${other.name} is the ${roleMap[shown].name}.`;
- }
- if(kind==="chef") {let n=0;for(let i=0;i<ring.length;i++)if(evil(ring[i])&&evil(ring[(i+1)%ring.length]))n++;return `You sense ${n} neighboring evil pair${n===1?"":"s"}.`;}
- return "";
+export type TroubleBrewingRole = {
+  id: string;
+  name: string;
+  team: Team;
+  ability: string;
+  first?: boolean;
+  repeat?: boolean;
+  once?: boolean;
 };
-function queueNight(s:S,r:()=>number){
- const tasks:Task[]=[];s.players.forEach(p=>{p.poisoned=false;delete p.poisonedBy;});s.nightDeaths=[]; const push=(id:string,k:string)=>{const p=s.players.find(x=>x.id===id);if(p?.alive)tasks.push({playerId:id,kind:k});};
- const pushRole=(id:string)=>s.players.forEach(p=>{if(apparentRole(p)===id)push(p.id,id);});
- if(s.firstNight&&s.players.length>=7){const minions=s.players.filter(x=>x.team==="Minion");const demon=s.players.find(x=>x.team==="Demon");for(const p of minions){const otherMinions=minions.filter(x=>x.id!==p.id).map(x=>x.name);p.info.push(`The Demon is ${demon?.name??"unknown"}. ${otherMinions.length?`Your fellow Minion${otherMinions.length===1?"":"s"}: ${otherMinions.join(", ")}.`:"You are the only Minion."}`);}for(const p of s.players)if(p.realRole==="imp")p.info.push(`Your Minions: ${minions.map(x=>x.name).join(", ")}. Possible bluffs: ${s.demonBluffs.map(x=>roleMap[x].name).join(", ")}.`);}
- pushRole("poisoner");
- if(!s.firstNight)pushRole("monk");
- pushRole("spy");
- if(s.firstNight)for(const id of ["washerwoman","librarian","investigator","chef"])pushRole(id);
- for(const id of s.newDemonIds??[])if(s.players.some(p=>p.id===id&&p.alive&&p.realRole==="imp"))tasks.push({playerId:id,kind:"new-imp-info"});
- if(!s.firstNight)for(const p of s.players)if(p.realRole==="imp")push(p.id,"imp");
- pushRole("empath");
- pushRole("fortune-teller");
- if(!s.firstNight&&s.priorExecution)pushRole("undertaker");
- pushRole("butler");
- s.queue=tasks;s.current=null;advanceNight(s,r);
-}
-function checkWin(s:S){const imp=s.players.find(p=>p.team==="Demon"&&p.alive);if(!imp){s.winner="Good";s.phase="finished";return true;}if(alive(s).length<=2){s.winner="Evil";s.phase="finished";return true;}return false;}
-function kill(s:S,p:P,by:"demon"|"execution"|"slayer",r:()=>number){if(!p.alive)return;const aliveBefore=alive(s).length;const protectedFromDemon=(target:P)=>target.realRole==="soldier"&&!target.poisoned||s.players.some(x=>x.realRole==="monk"&&x.alive&&s.nightPicks[x.id]?.[0]===target.id&&!x.poisoned);if(by==="demon"&&protectedFromDemon(p))return; if(by==="demon"&&p.realRole==="mayor"&&!p.poisoned){const others=alive(s).filter(x=>x.id!==p.id);p=pick(others,r);if(protectedFromDemon(p))return;}p.alive=false;if(p.realRole==="poisoner"){for(const target of s.players)if(target.poisonedBy===p.id){target.poisoned=false;delete target.poisonedBy;}}if(by==="execution")s.priorExecution=p.id;if(by==="demon"){s.nightDeaths.push(p.name);if((p.realRole==="ravenkeeper"||p.realRole==="drunk"&&p.role==="ravenkeeper"))s.queue.unshift({playerId:p.id,kind:"ravenkeeper"});}if(p.realRole==="saint"&&by==="execution"&&!p.poisoned){s.winner="Evil";s.phase="finished";}if(p.realRole==="imp"&&by!=="demon"){const sw=s.players.find(x=>x.realRole==="scarlet-woman"&&x.alive&&!x.poisoned);if(sw&&aliveBefore>=5){sw.realRole="imp";sw.role="imp";sw.team="Demon";s.newDemonIds??=[];s.newDemonIds.push(sw.id);}else{s.winner="Good";s.phase="finished";}}if(by!=="demon")checkWin(s);}
-function advanceNight(s:S,r:()=>number){if(s.phase==="finished")return;while(s.queue.length){const task=s.queue.shift()!;const p=s.players.find(x=>x.id===task.playerId);if(!p||(!p.alive&&task.kind!=="ravenkeeper"))continue;if(task.kind==="new-imp-info"){p.info.push("You are now the Imp.");s.newDemonIds=(s.newDemonIds??[]).filter(id=>id!==p.id);continue;}if(["washerwoman","librarian","investigator","chef"].includes(task.kind)){p.info.push(makeInfo(s,p,task.kind,r));continue;}if(task.kind==="empath"){const [a,b]=neighbors(s,p);const count=abilityWorks(p)?[a,b].filter(x=>registersEvil(x,r)).length:Math.floor(r()*3);p.info.push(`Empath (Night ${s.day+1}): ${count}.`);continue;}if(task.kind==="undertaker"){const executed=s.players.find(x=>x.id===s.priorExecution);if(executed){let shown=executed.realRole;if(!abilityWorks(p))shown=pick(roles,r).id;else if(executed.realRole==="recluse"&&r()<.5)shown=pick(byTeam("Minion").concat("imp"),r);else if(executed.realRole==="spy"&&r()<.25)shown=pick(byTeam("Townsfolk").concat(byTeam("Outsider")),r);p.info.push(`Undertaker (Night ${s.day+1}): the executed player was ${roleMap[shown].name}.`);}continue;}if(task.kind==="spy"){if(abilityWorks(p))p.info.push(`Grimoire: ${s.players.map(x=>`${x.name} — ${roleMap[x.realRole].name}${x.alive?"":" (dead)"}${x.poisoned?" (poisoned)":""}`).join("; ")}`);continue;}s.current=task;return;}s.current=null;finishNight(s);}
-function finishNight(s:S){if(s.phase==="finished")return;s.notices=[];if(s.nightDeaths.length)s.notices.push(`${s.nightDeaths.join(" and ")} died during the night.`);else s.notices.push("No one died during the night.");if(!checkWin(s)){s.phase="day";s.day=Math.max(1,s.day+1);s.dayStage="discussion";s.discussionEndsAt=Date.now()+5*60*1000;s.executedToday=false;s.botNominationsDecided=[];s.notices.push("The town gathers. Discussion begins.");}s.firstNight=false;s.priorExecution=null;s.current=null;s.attackResolved=false;}
-function startNight(s:S,r:()=>number){if(s.phase==="finished")return;if(!s.executedToday&&alive(s).length===3&&s.players.some(p=>p.realRole==="mayor"&&p.alive&&!p.poisoned)){s.winner="Good";s.phase="finished";s.notices.push("The Mayor's ability ends the game. Good wins.");return;}s.phase="night";s.dayStage=null;s.nominationStage=null;s.nominationEndsAt=null;s.discussionEndsAt=null;s.nominations=[];s.nominationResults=[];s.executionBlock=null;s.executionBlockVotes=0;s.executionBlockTied=false;s.nominatedBy=[];s.botNominationsDecided=[];s.botVotesDecided=[];s.votes={};s.voteChoices={};s.voteOrder=[];s.voteCursor=0;s.currentVoterId=null;s.currentNominee=null;s.voteTurnEndsAt=null;s.nightPicks={};s.attackResolved=false;queueNight(s,r);}
-function project(s:S,id:string):PlayerPrivateView|null{const p=s.players.find(x=>x.id===id);if(!p)return null;const role=roleMap[p.role];const currentVoterId=nextVotePlayerId(s);const voteSeatIndex=voteOrder(s).indexOf(id);const voteCursor=s.voteCursor??(currentVoterId?voteOrder(s).indexOf(currentVoterId):voteOrder(s).length);const canStillVote=voteSeatIndex>=voteCursor;const voteChoice=voteChoices(s)[id];const info=[...p.info];if(!p.alive&&s.phase==="night"){const executed=s.players.find(x=>x.id===s.priorExecution);if(p.realRole==="undertaker"&&executed){const prefix=`Undertaker: the executed player was ${roleMap[executed.realRole].name}.`;removeLastInfo(info,value=>value===prefix||value.startsWith(`Undertaker (Night ${s.day+1}):`));}if(p.realRole==="empath")removeLastInfo(info,value=>/^Empath: \d+\.$/.test(value)||value.startsWith(`Empath (Night ${s.day+1}):`));if(p.realRole==="fortune-teller")removeLastInfo(info,value=>value.startsWith(`Fortune Teller (Night ${s.day+1}):`));}if(!p.alive&&s.phase==="day"){const notices=s.notices??[];const latestDawn=notices.reduce((found,value,index)=>value.includes("died during the night.")?index:found,-1);const latestDayStart=notices.reduce((found,value,index)=>value.includes("Discussion begins.")?index:found,-1);const diedThisNight=(s.nightDeaths??[]).includes(p.name)||latestDawn>latestDayStart&&notices[latestDawn].includes(p.name);if(diedThisNight){let executedPlayer:P|undefined;for(let i=latestDayStart+1;i<latestDawn;i++)executedPlayer=s.players.find(candidate=>notices[i].includes(`${candidate.name} is executed.`))??executedPlayer;if(p.realRole==="undertaker"&&executedPlayer)removeLastInfo(info,value=>value===`Undertaker: the executed player was ${roleMap[executedPlayer!.realRole].name}.`||value.startsWith(`Undertaker (Night ${s.day}):`));if(p.realRole==="empath")removeLastInfo(info,value=>/^Empath: \d+\.$/.test(value)||value.startsWith(`Empath (Night ${s.day}):`));if(p.realRole==="fortune-teller")removeLastInfo(info,value=>value.startsWith(`Fortune Teller (Night ${s.day}):`));}}const actions:PlayerPrivateView["actions"]=[];let prompt:string|null=null;
- const add=(label:string,command:GameCommand)=>actions.push({id:`${String(command.type)}-${JSON.stringify(command)}`,label,command});
- if(s.phase==="night"&&s.current?.playerId===id){const k=s.current.kind;prompt=`Night action: ${k.replaceAll("-"," ")}.`;const targets=s.players.filter(x=>x.id!==id||["imp","ravenkeeper","poisoner"].includes(k));if(["poisoner","monk","imp","butler","ravenkeeper"].includes(k))for(const t of targets)add(`${k==="imp"?"Choose to kill ":k==="monk"?"Protect ":k==="poisoner"?"Poison ":k==="butler"?"Choose master ":"Learn about "}${t.name}`,{type:"NIGHT_CHOOSE",targetPlayerId:t.id});
- if(k==="fortune-teller")for(const a of s.players)for(const b of s.players)if(a.id!==b.id)add(`Check ${a.name} + ${b.name}`,{type:"NIGHT_CHOOSE",targetPlayerId:a.id,secondTargetPlayerId:b.id});
- }
- if(s.phase==="day"&&p.alive){if(p.role==="slayer"&&!p.onceUsed)for(const t of s.players)add(`Slay ${t.name}`,{type:"SLAYER_SHOT",targetPlayerId:t.id});if(!s.currentNominee&&!s.executedToday&&(s.dayStage??"nominations")==="nominations")for(const t of s.players.filter(x=>!s.nominations.includes(x.id)))add(`Nominate ${t.name}${t.alive?"":" (dead)"}`,{type:"NOMINATE",nomineeId:t.id});}
- if(s.phase==="day"&&s.currentNominee&&((s.nominationStage??"voting")==="countdown"||(s.nominationStage??"voting")==="voting")&&canStillVote&&(p.alive||p.ghostVote)){const masterId=s.nightPicks[p.id]?.[0];const canVoteYes=p.realRole!=="butler"||!p.alive||p.poisoned||(masterId!==undefined&&s.votes[masterId]===true);if(voteChoice==="yes")add("Lower hand",{type:"VOTE",vote:false,nomineeId:s.currentNominee});else if(canVoteYes)add(p.alive?"Raise hand to vote yes":"Use ghost vote: yes",{type:"VOTE",vote:true,nomineeId:s.currentNominee});if(p.isBot)add("Keep hand down (no)",{type:"VOTE",vote:false,nomineeId:s.currentNominee});}
- if(s.phase==="day"&&p.isHost){if(!s.currentNominee&&s.dayStage==="discussion")add("Start nominations early",{type:"OPEN_NOMINATIONS"});else if(s.currentNominee&&(s.nominationStage==="accusation"||s.nominationStage==="defense"))add(s.nominationStage==="accusation"?"End accusation early":"End defence early",{type:"ADVANCE_NOMINATION",nomineeId:s.currentNominee,stage:s.nominationStage,early:true});else if(!s.currentNominee&&s.dayStage==="nominations")add("Close nominations and begin night",{type:"CLOSE_NOMINATIONS"});}
- if(s.phase==="day"&&s.currentNominee&&(s.nominationStage??"voting")!=="voting"){prompt=s.nominationStage==="accusation"?`${s.players.find(x=>x.id===s.nominationCursor)?.name??"The nominator"} has one minute to make their accusation.`:s.nominationStage==="defense"?`${s.players.find(x=>x.id===s.currentNominee)?.name??"The nominee"} has one minute to defend.`:`Voting starts in five seconds. You may raise your hand now; it stays changeable until your seat is passed in the clockwise sweep.`;}
- if(s.phase==="day"&&s.currentNominee&&(s.nominationStage??"voting")==="voting"){
-  const currentVoter=s.players.find(x=>x.id===currentVoterId);
-  if(!p.alive&&!p.ghostVote)prompt="You have no ghost vote remaining, so your seat is skipped.";
-  else if(voteSeatIndex<voteCursor)prompt=`Your seat has been passed. Your vote is final.`;
-  else if(voteChoice==="yes")prompt=currentVoterId===id?"Your hand is raised. The Storyteller is counting your seat now.":"Your hand is raised. You can lower it until the Storyteller passes your seat.";
-  else if(currentVoterId===id)prompt=p.realRole==="butler"&&!p.poisoned&&s.nightPicks[p.id]?.[0]&&s.votes[s.nightPicks[p.id]![0]]!==true?"Your seat is being counted. Keep your hand down for no; raise it only if your Master has their hand raised or has already voted yes.":"Your seat is being counted. Raise your hand to vote yes; if it stays down when the Storyteller passes, it counts as no.";
-  else prompt=`You may raise your hand early or wait. You can lower it until your seat is passed. No button is needed for a no vote. Voting proceeds clockwise, starting with the nominee; ${currentVoter?.name??"the next player"} is being counted now.`;
- }
- else if(s.phase==="day"&&p.alive){prompt=s.dayStage==="discussion"?"Discussion time is open. Nominations begin when the timer ends, or the host can open them early.":s.executedToday?"An execution has ended the day. Night is beginning.":s.nominatedBy.includes(id)?"You have used your nomination for today. Wait for another player to nominate.":s.executionBlock?`${s.players.find(x=>x.id===s.executionBlock)?.name} is on the block with ${s.executionBlockVotes} votes. Nominations continue; a later nominee needs more votes to replace them.`:s.executionBlockTied?"The leading nomination votes are tied, so nobody is on the block. Nominations continue.":"Choose a player to nominate. The top vote getter is executed when nominations close.";}
- return {role:{id:p.role,name:role.name,team:role.team,ability:role.ability},information:[...new Set(info)],prompt,actions};}
-export const troubleBrewing:GameRuleset={id:"trouble-brewing",version:"1.0.0",minPlayers:5,maxPlayers:15,
- createInitialState(participants,random){const n=participants.length, setup=counts[n];if(!setup)throw new Error("Trouble Brewing supports 5–15 players.");let [nt,no]=setup;const [, ,nm]=setup;const chosen:string[]=[];for(let i=0;i<nm;i++)chosen.push(pick(byTeam("Minion").filter(x=>!chosen.includes(x)),random));chosen.push("imp");if(chosen.includes("baron")){no+=2;nt-=2;}for(let i=0;i<nt;i++)chosen.push(pick(byTeam("Townsfolk").filter(x=>!chosen.includes(x)),random));for(let i=0;i<no;i++)chosen.push(pick(byTeam("Outsider").filter(x=>!chosen.includes(x)),random));if(chosen.length<n)chosen.push("drunk");
- const assigned=shuffle(chosen,random);const players=participants.map((u,i)=>{const realRole=assigned[i];let role=realRole,drunkAs:string|undefined;if(realRole==="drunk"){drunkAs=pick(byTeam("Townsfolk"),random);role=drunkAs;}const definition=roleMap[realRole];return{id:u.id,name:u.displayName,isHost:u.isHost,isBot:u.isBot===true,alive:true,role,realRole,team:definition.team,drunkAs,poisoned:false,onceUsed:false,ghostVote:true,info:[],redHerring:false} as P;});const goodPlayers=players.filter(x=>x.team==="Townsfolk"||x.team==="Outsider");const redHerring=goodPlayers.length?pick(goodPlayers,random):undefined;if(redHerring)redHerring.redHerring=true;const s:S={players,order:shuffle(players.map(x=>x.id),random),day:0,phase:"night",dayStage:null,nominationStage:null,nominationEndsAt:null,discussionEndsAt:null,voteTurnEndsAt:null,firstNight:true,queue:[],current:null,attackResolved:false,nightDeaths:[],newDemonIds:[],nightPicks:{},priorExecution:null,executedToday:false,nominations:[],nominationResults:[],executionBlock:null,executionBlockVotes:0,executionBlockTied:false,nominatedBy:[],botNominationsDecided:[],botVotesDecided:[],votes:{},voteChoices:{},voteOrder:[],voteCursor:0,currentVoterId:null,currentNominee:null,nominationCursor:null,nominationUsed:false,virginSpent:false,notices:[],winner:null,demonBluffs:shuffle(byTeam("Townsfolk").filter(x=>!players.some(p=>p.realRole===x)),random).slice(0,3)};queueNight(s,random);return state(s);},
- applyCommand(current,actor,command,random):GameTransition{const s=JSON.parse(JSON.stringify(current.secretState)) as S;s.nominationStage??=s.currentNominee?"voting":null;s.nominationEndsAt??=null;s.attackResolved??=false;s.nightDeaths??=[];s.newDemonIds??=[];s.nominationResults??=[];s.executionBlock??=null;s.executionBlockVotes??=0;s.executionBlockTied??=false;if(!s.voteChoices)s.voteChoices=Object.fromEntries(Object.entries(s.votes??{}).map(([id,vote])=>[id,vote?"yes":"no"]));s.voteOrder??=[];s.voteCursor??=0;s.currentVoterId??=null;if(s.currentNominee&&!s.voteOrder.length){const nomineeSeat=s.order.indexOf(s.currentNominee);s.voteOrder=s.order.slice(nomineeSeat).concat(s.order.slice(0,nomineeSeat));}if(s.currentNominee&&s.nominationStage==="voting"&&!s.currentVoterId)advanceVoteCursor(s);s.botNominationsDecided??=[];s.botVotesDecided??=[];if(s.currentNominee&&s.nominationStage==="voting"&&s.voteTurnEndsAt==null)s.voteTurnEndsAt=Date.now()-1;const p=s.players.find(x=>x.id===actor.id);if(!p)fail("NOT_PLAYER","You are not in this game.");
- if(command.type==="NIGHT_CHOOSE"){if(s.phase!=="night"||s.current?.playerId!==p.id)fail("NOT_YOUR_TURN","There is no night action waiting for you.");const task=s.current;const target=s.players.find(x=>x.id===command.targetPlayerId);if(!target)fail("BAD_TARGET","That player is not in this game.");const k=task.kind;if((k==="monk"||k==="butler")&&target.id===p.id)fail("BAD_TARGET","Choose another player.");if(k==="fortune-teller"){const second=s.players.find(x=>x.id===command.secondTargetPlayerId);if(!second||second.id===target.id)fail("BAD_TARGET","Choose two different players.");let yes=[target,second].some(x=>x.realRole==="imp"||x.redHerring||x.realRole==="recluse"&&random()<.5);if(!abilityWorks(p))yes=random()<.5;p.info.push(`Fortune Teller (Night ${s.day+1}): ${yes?"yes":"no"}.`);}else if(k==="ravenkeeper"){let revealedRole=target.realRole;if(!abilityWorks(p))revealedRole=pick(roles,random).id;else if(target.realRole==="recluse"&&random()<.5)revealedRole=pick(byTeam("Minion").concat("imp"),random);else if(target.realRole==="spy"&&random()<.25)revealedRole=pick(byTeam("Townsfolk").concat(byTeam("Outsider")),random);p.info.push(`Ravenkeeper: ${target.name} is ${roleMap[revealedRole].name}.`);}else if(k==="poisoner"){for(const previous of s.players)if(previous.poisonedBy===p.id){previous.poisoned=false;delete previous.poisonedBy;}const poisonWorks=abilityWorks(p);if(poisonWorks){target.poisoned=true;target.poisonedBy=p.id;}s.nightPicks[p.id]=[target.id];}else if(k==="imp"){s.nightPicks[p.id]=[target.id];if(abilityWorks(p)){if(target.id===p.id){const sw=s.players.find(x=>x.realRole==="scarlet-woman"&&x.alive&&!x.poisoned);const next=alive(s).length>=5&&sw?sw:s.players.find(x=>x.team==="Minion"&&x.alive);p.alive=false;s.nightDeaths.push(p.name);if(next){next.realRole="imp";next.role="imp";next.team="Demon";s.newDemonIds.push(next.id);s.queue.unshift({playerId:next.id,kind:"new-imp-info"});}else{s.winner="Good";s.phase="finished";s.notices.push(`${p.name} died during the night.`);}}else kill(s,target,"demon",random);}}else{s.nightPicks[p.id]=[target.id];}advanceNight(s,random);return{state:state(s),eventType:"night_action",eventPayload:{kind:k,actorId:p.id}};}
- if(command.type==="OPEN_NOMINATIONS"){if(s.phase!=="day"||s.currentNominee||s.dayStage!=="discussion")fail("INVALID_PHASE","Nominations cannot be opened right now.");const deadline=s.discussionEndsAt??0;if(!actor.isHost&&Date.now()<deadline)fail("HOST_REQUIRED","Only the host can start nominations before the discussion timer ends.");s.dayStage="nominations";s.discussionEndsAt=null;s.notices.push("The discussion timer ends. Nominations are now open.");return{state:state(s),eventType:"nominations_opened",eventPayload:{day:s.day}};}
- if(command.type==="BOT_SKIP_NOMINATION"){if(!actor.isBot||!p.isBot||!p.alive||s.phase!=="day"||s.currentNominee||(s.dayStage??"nominations")!=="nominations"||s.botNominationsDecided.includes(p.id)||s.nominatedBy.includes(p.id))fail("INVALID_BOT_ACTION","This bot cannot pass on a nomination now.");s.botNominationsDecided.push(p.id);s.notices.push(`${p.name} decided not to nominate today.`);return{state:state(s),eventType:"bot_nomination_passed",eventPayload:{botId:p.id}};}
- if(command.type==="NOMINATE"){if(s.phase!=="day"||!p.alive||s.executedToday||s.currentNominee||(s.dayStage??"nominations")!=="nominations")fail("INVALID_PHASE","Nominations are not open right now.");const target=s.players.find(x=>x.id===command.nomineeId);if(!target||s.nominatedBy.includes(p.id)||s.nominations.includes(target.id))fail("INVALID_NOMINATION","That nomination is not allowed.");s.nominatedBy.push(p.id);if(p.isBot&&!s.botNominationsDecided.includes(p.id))s.botNominationsDecided.push(p.id);s.nominations.push(target.id);s.currentNominee=target.id;s.nominationStage="accusation";s.nominationEndsAt=Date.now()+60_000;s.voteTurnEndsAt=null;s.currentVoterId=null;s.botVotesDecided=[];s.nominationCursor=p.id;s.votes={};s.voteChoices={};const nomineeSeat=s.order.indexOf(target.id);s.voteOrder=s.order.slice(nomineeSeat).concat(s.order.slice(0,nomineeSeat));s.voteCursor=0;s.notices.push(`${p.name} nominated ${target.name}${target.alive?"":" (dead)"}.`);const virgin=s.players.find(x=>x.id===target.id&&x.realRole==="virgin");if(virgin?.alive&&!s.virginSpent){s.virginSpent=true;const nominee=p;if(nominee.team==="Townsfolk"&&abilityWorks(virgin)){s.executedToday=true;kill(s,nominee,"execution",random);s.currentNominee=null;s.currentVoterId=null;s.voteOrder=[];s.voteCursor=0;s.nominationStage=null;s.nominationEndsAt=null;s.voteTurnEndsAt=null;s.notices.push(`${nominee.name} was executed immediately after nominating ${target.name}, the Virgin.`);checkWin(s);if(!s.winner)startNight(s,random);}}return{state:state(s),eventType:"nomination",eventPayload:{nomineeId:target.id,by:p.id}};}
- if(command.type==="ADVANCE_NOMINATION"){
-  if(s.phase!=="day"||!s.currentNominee||!s.nominationStage)fail("INVALID_PHASE","There is no nomination discussion to advance.");
-  if(command.nomineeId!==s.currentNominee||command.stage!==s.nominationStage)fail("NOMINATION_STAGE_CHANGED","This nomination stage has already changed.");
-  const early=command.early===true;
-  if(early&&(!actor.isHost||s.nominationStage==="countdown"))fail("HOST_REQUIRED","Only the host can end the accusation or defence early.");
-  if(!early&&Date.now()<(s.nominationEndsAt??0))fail("NOMINATION_TIMER_ACTIVE","This speaking or countdown timer is still running.");
-  if(s.nominationStage==="accusation"){
-   s.nominationStage="defense";s.nominationEndsAt=Date.now()+60_000;
-  }else if(s.nominationStage==="defense"){
-   s.nominationStage="countdown";s.nominationEndsAt=Date.now()+5_000;
-  }else if(s.nominationStage==="countdown"){
-   s.nominationStage="voting";s.nominationEndsAt=null;s.voteCursor=0;advanceVoteCursor(s);s.voteTurnEndsAt=Date.now()+3_000;
+const roles: TroubleBrewingRole[] = [
+  {
+    id: "washerwoman",
+    name: "Washerwoman",
+    team: "Townsfolk",
+    ability: "At the start, learn two players; one is a named Townsfolk.",
+    first: true,
+  },
+  {
+    id: "librarian",
+    name: "Librarian",
+    team: "Townsfolk",
+    ability:
+      "At the start, learn two players; one is a named Outsider (or learn that none are in play).",
+    first: true,
+  },
+  {
+    id: "investigator",
+    name: "Investigator",
+    team: "Townsfolk",
+    ability: "At the start, learn two players; one is a named Minion.",
+    first: true,
+  },
+  {
+    id: "chef",
+    name: "Chef",
+    team: "Townsfolk",
+    ability:
+      "At the start, learn how many neighboring pairs of evil players there are.",
+    first: true,
+  },
+  {
+    id: "empath",
+    name: "Empath",
+    team: "Townsfolk",
+    ability: "Each night, learn how many alive neighbors are evil.",
+    repeat: true,
+  },
+  {
+    id: "fortune-teller",
+    name: "Fortune Teller",
+    team: "Townsfolk",
+    ability:
+      "Each night, choose two players; learn whether either is the Demon or your red herring.",
+    repeat: true,
+  },
+  {
+    id: "undertaker",
+    name: "Undertaker",
+    team: "Townsfolk",
+    ability: "After an execution, learn that player's character that night.",
+    repeat: true,
+  },
+  {
+    id: "monk",
+    name: "Monk",
+    team: "Townsfolk",
+    ability: "Each night after the first, protect a player from the Demon.",
+    repeat: true,
+  },
+  {
+    id: "ravenkeeper",
+    name: "Ravenkeeper",
+    team: "Townsfolk",
+    ability: "If killed at night, choose a player and learn their character.",
+    repeat: true,
+  },
+  {
+    id: "virgin",
+    name: "Virgin",
+    team: "Townsfolk",
+    ability: "The first Townsfolk to nominate you is executed immediately.",
+    once: true,
+  },
+  {
+    id: "slayer",
+    name: "Slayer",
+    team: "Townsfolk",
+    ability:
+      "Once per game during the day, publicly choose a player; the Demon dies if chosen.",
+    once: true,
+  },
+  {
+    id: "soldier",
+    name: "Soldier",
+    team: "Townsfolk",
+    ability: "The Demon cannot kill you at night.",
+  },
+  {
+    id: "mayor",
+    name: "Mayor",
+    team: "Townsfolk",
+    ability:
+      "If only three live and no execution occurs, good may win; a Demon attack may redirect.",
+  },
+  {
+    id: "butler",
+    name: "Butler",
+    team: "Outsider",
+    ability: "Each night choose a player; you may vote only when they vote.",
+    repeat: true,
+  },
+  {
+    id: "drunk",
+    name: "Drunk",
+    team: "Outsider",
+    ability:
+      "You believe you are a Townsfolk character, but your ability does not work.",
+  },
+  {
+    id: "recluse",
+    name: "Recluse",
+    team: "Outsider",
+    ability:
+      "The game may treat you as evil or as a Minion or Demon for detection.",
+  },
+  {
+    id: "saint",
+    name: "Saint",
+    team: "Outsider",
+    ability: "If executed, evil wins.",
+  },
+  {
+    id: "poisoner",
+    name: "Poisoner",
+    team: "Minion",
+    ability:
+      "Each night choose a player; their ability fails until tomorrow night.",
+    repeat: true,
+  },
+  {
+    id: "spy",
+    name: "Spy",
+    team: "Minion",
+    ability:
+      "Each night see the full Grimoire; the game may treat you as good or as a Townsfolk/Outsider.",
+  },
+  {
+    id: "baron",
+    name: "Baron",
+    team: "Minion",
+    ability: "Two additional Outsiders replace two Townsfolk in setup.",
+  },
+  {
+    id: "scarlet-woman",
+    name: "Scarlet Woman",
+    team: "Minion",
+    ability: "If the Demon dies with at least five alive, become the Demon.",
+  },
+  {
+    id: "imp",
+    name: "Imp",
+    team: "Demon",
+    ability:
+      "Each night choose a player to kill. You may choose yourself to pass the Demon role to a Minion.",
+    repeat: true,
+  },
+];
+const roleMap = Object.fromEntries(roles.map((r) => [r.id, r])) as Record<
+  string,
+  TroubleBrewingRole
+>;
+const byTeam = (team: Team) =>
+  roles.filter((r) => r.team === team).map((r) => r.id);
+const shuffle = <T>(values: T[], r: () => number) => {
+  const result = [...values];
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = Math.floor(r() * (i + 1));
+    [result[i], result[j]] = [result[j], result[i]];
   }
-  return{state:state(s),eventType:"nomination_stage_advanced",eventPayload:{nomineeId:s.currentNominee,stage:s.nominationStage}};
- }
- if(command.type==="VOTE"){
-  const voterIndex=s.voteOrder.indexOf(p.id);
-  if(s.phase!=="day"||!s.currentNominee||(s.nominationStage!=="voting"&&s.nominationStage!=="countdown")||voterIndex<s.voteCursor||(!p.alive&&!p.ghostVote))fail("INVALID_VOTE","Your seat has already been passed, or you are not eligible to vote.");
-  if(command.vote!==true&&command.vote!==false)fail("INVALID_VOTE","Raise or lower your hand to vote.");if(typeof command.nomineeId==="string"&&command.nomineeId!==s.currentNominee)fail("VOTE_CHANGED","That nomination has already moved on.");
-  const masterId=s.nightPicks[p.id]?.[0];
-  if(command.vote===true&&p.realRole==="butler"&&p.alive&&!p.poisoned&&(!masterId||s.votes[masterId]!==true))fail("BUTLER_VOTE","You may raise your hand only when your Master has their hand raised or has already voted yes.");
-  if(command.vote){s.voteChoices[p.id]="yes";s.votes[p.id]=true;}else{delete s.voteChoices[p.id];delete s.votes[p.id];}
-  if(p.isBot){s.botVotesDecided??=[];if(!s.botVotesDecided.includes(p.id))s.botVotesDecided.push(p.id);}
-  return{state:state(s),eventType:"vote",eventPayload:{actorId:p.id,raised:command.vote}};
- }
- if(command.type==="ADVANCE_VOTE"){
-  if(s.phase!=="day"||!s.currentNominee||!s.currentVoterId)fail("INVALID_PHASE","There is no active vote seat to pass.");if(typeof command.nomineeId==="string"&&command.nomineeId!==s.currentNominee)fail("VOTE_CHANGED","That nomination has already moved on.");if(typeof command.playerId==="string"&&command.playerId!==s.currentVoterId)fail("VOTE_SEAT_PASSED","That vote seat has already been passed.");
-  if(s.nominationStage!=="voting")fail("VOTE_TIMER_ACTIVE","The nomination discussion and countdown must finish before voting.");if(Date.now()<(s.voteTurnEndsAt??0))fail("VOTE_TIMER_ACTIVE","The current seat is still being counted.");
-  const passedId=s.currentVoterId;const passed=s.players.find(player=>player.id===passedId);
-  if(passed?.alive===false&&passed.ghostVote&&s.votes[passedId])passed.ghostVote=false;
-  const wasRaised=Boolean(s.votes[passedId]);s.voteCursor++;advanceVoteCursor(s);
-  if(!s.currentVoterId)settleVote(s,s.currentNominee);else s.voteTurnEndsAt=Date.now()+3000;
-  return{state:state(s),eventType:"vote_seat_passed",eventPayload:{playerId:passedId,raised:wasRaised}};
- }
- if(command.type==="SLAYER_SHOT"){if(s.phase!=="day"||!p.alive||p.role!=="slayer"||p.onceUsed)fail("SLAYER_UNAVAILABLE","Your Slayer ability is unavailable.");const target=s.players.find(x=>x.id===command.targetPlayerId);if(!target)fail("BAD_TARGET","That player is not in this game.");p.onceUsed=true;const slayWorks=abilityWorks(p);const isDemon=target.alive&&(target.team==="Demon"&&target.realRole==="imp"||target.realRole==="recluse"&&random()<.5);if(slayWorks&&isDemon)kill(s,target,"slayer",random);s.notices.push(`${p.name} used the Slayer ability on ${target.name}${slayWorks&&isDemon?" and they died":""}.`);checkWin(s);return{state:state(s),eventType:"slayer_shot",eventPayload:{actorId:p.id}};}
- if(command.type==="CLOSE_NOMINATIONS"){if(!actor.isHost||s.phase!=="day"||s.currentNominee||(s.dayStage??"nominations")!=="nominations")fail("NOT_ALLOWED","Only the room creator can close nominations after they have opened.");if(s.executionBlock){const target=s.players.find(x=>x.id===s.executionBlock)!;if(target.alive){s.executedToday=true;kill(s,target,"execution",random);s.notices.push(`${target.name} is executed with ${s.executionBlockVotes} votes.`);checkWin(s);}else s.notices.push(`${target.name} was on the block but is already dead; no execution occurs.`);}else s.notices.push(s.executionBlockTied?"No execution occurs because the leading vote was tied.":"No execution occurs today.");if(!s.winner)startNight(s,random);return{state:state(s),eventType:s.executedToday?"execution":"night_started",eventPayload:{day:s.day,executed:s.executedToday} as unknown as JsonValue};}
- fail("UNKNOWN_COMMAND","That game action is not supported.");
- }, projectPublicState(secret){return makePublic(JSON.parse(JSON.stringify(secret)) as S) as unknown as JsonValue;}, projectPrivateState(secret,id){return project(JSON.parse(JSON.stringify(secret)) as S,id);}
+  return result;
+};
+export const troubleBrewingRoles = roles;
+export const troubleBrewingSetupCounts: Record<
+  number,
+  [number, number, number, number]
+> = {
+  5: [3, 0, 1, 1],
+  6: [3, 1, 1, 1],
+  7: [5, 0, 1, 1],
+  8: [5, 1, 1, 1],
+  9: [5, 2, 1, 1],
+  10: [7, 0, 2, 1],
+  11: [7, 1, 2, 1],
+  12: [7, 2, 2, 1],
+  13: [9, 0, 3, 1],
+  14: [9, 1, 3, 1],
+  15: [9, 2, 3, 1],
+};
+const counts = troubleBrewingSetupCounts;
+type P = {
+  id: string;
+  name: string;
+  isHost: boolean;
+  isBot: boolean;
+  alive: boolean;
+  role: string;
+  realRole: string;
+  team: Team;
+  drunkAs?: string;
+  poisoned: boolean;
+  poisonedBy?: string;
+  onceUsed: boolean;
+  ghostVote: boolean;
+  info: string[];
+  redHerring: boolean;
+};
+type Task = { playerId: string; kind: string };
+type S = {
+  players: P[];
+  order: string[];
+  day: number;
+  phase: "night" | "day" | "finished";
+  dayStage: "discussion" | "nominations" | null;
+  nominationStage: "accusation" | "defense" | "countdown" | "voting" | null;
+  nominationEndsAt: number | null;
+  discussionEndsAt: number | null;
+  voteTurnEndsAt: number | null;
+  firstNight: boolean;
+  queue: Task[];
+  current: Task | null;
+  attackResolved: boolean;
+  nightDeaths: string[];
+  newDemonIds: string[];
+  nightPicks: Record<string, string[]>;
+  priorExecution: string | null;
+  executedToday: boolean;
+  nominations: string[];
+  nominationResults: Array<{ nomineeId: string; votes: number }>;
+  executionBlock: string | null;
+  executionBlockVotes: number;
+  executionBlockTied: boolean;
+  nominatedBy: string[];
+  botNominationsDecided: string[];
+  botVotesDecided: string[];
+  votes: Record<string, boolean>;
+  voteChoices: Record<string, "yes" | "no" | "abstain">;
+  voteOrder: string[];
+  voteCursor: number;
+  currentVoterId: string | null;
+  currentNominee: string | null;
+  nominationCursor: string | null;
+  nominationUsed: boolean;
+  virginSpent: boolean;
+  notices: string[];
+  winner: string | null;
+  demonBluffs: string[];
+};
+const makePublic = (s: S): PublicGameView => {
+  const currentVoterId = nextVotePlayerId(s);
+  return {
+    headline: s.winner
+      ? `${s.winner} wins`
+      : s.phase === "night"
+        ? s.day === 0
+          ? "The first night begins"
+          : `Night ${s.day} falls`
+        : `Day ${s.day}: discuss, nominate, and vote`,
+    dayStage: s.phase === "day" ? (s.dayStage ?? "nominations") : null,
+    nominationStage:
+      s.phase === "day"
+        ? (s.nominationStage ?? (s.currentNominee ? "voting" : null))
+        : null,
+    nominationEndsAt:
+      s.phase === "day" && s.currentNominee ? s.nominationEndsAt : null,
+    voteStartsAt:
+      s.phase === "day" &&
+      (s.nominationStage ?? (s.currentNominee ? "voting" : null)) ===
+        "countdown"
+        ? s.nominationEndsAt
+        : null,
+    highlightedPlayerId:
+      (s.nominationStage ?? (s.currentNominee ? "voting" : null)) ===
+      "countdown"
+        ? s.currentNominee
+        : (s.nominationStage ?? (s.currentNominee ? "voting" : null)) ===
+            "voting"
+          ? currentVoterId
+          : null,
+    discussionEndsAt:
+      s.phase === "day" && s.dayStage === "discussion"
+        ? s.discussionEndsAt
+        : null,
+    voteTurnEndsAt:
+      s.phase === "day" &&
+      s.currentNominee &&
+      (s.nominationStage ?? "voting") === "voting"
+        ? (s.voteTurnEndsAt ?? 0)
+        : null,
+    players: bySeatingOrder(s).map((p) => ({
+      id: p.id,
+      displayName: p.name,
+      alive: p.alive || (s.phase === "night" && s.nightDeaths.includes(p.name)),
+      hasGhostVote: p.ghostVote,
+    })),
+    livingPlayerCount: alive(s).length,
+    votesRequiredForBlock: Math.ceil(alive(s).length / 2),
+    currentNomination: s.currentNominee
+      ? {
+          nomineeId: s.currentNominee,
+          nomineeName:
+            s.players.find((p) => p.id === s.currentNominee)?.name ?? "",
+          nominatorName:
+            s.players.find((p) => p.id === s.nominationCursor)?.name ?? "",
+          votesFor: Object.values(s.votes).filter(Boolean).length,
+          ballots: Object.entries(s.votes)
+            .filter(([, vote]) => vote)
+            .map(([playerId]) => ({
+              playerId,
+              displayName: s.players.find((p) => p.id === playerId)?.name ?? "",
+              vote: true,
+            })),
+        }
+      : null,
+    currentVoter:
+      (s.nominationStage ?? (s.currentNominee ? "voting" : null)) ===
+        "voting" && currentVoterId
+        ? {
+            playerId: currentVoterId,
+            displayName:
+              s.players.find((p) => p.id === currentVoterId)?.name ?? "",
+          }
+        : null,
+    executionBlock: s.executionBlock
+      ? {
+          nomineeId: s.executionBlock,
+          nomineeName:
+            s.players.find((p) => p.id === s.executionBlock)?.name ?? "",
+          votes: s.executionBlockVotes,
+        }
+      : null,
+    executionBlockTied: s.executionBlockTied,
+    notices: s.notices.filter(
+      (notice) =>
+        !/\bvoted (yes|no) on\b/i.test(notice) &&
+        !/^The accusation ends\. The nominee has one minute to defend\.$|^The defence ends\. Voting begins after the five-second countdown\.$|^The vote sweep begins with the nominee and proceeds clockwise\.$/.test(
+          notice,
+        ),
+    ),
+    ...(s.phase === "finished"
+      ? {
+          revealedRoles: s.players.map((p) => ({
+            playerId: p.id,
+            displayName: p.name,
+            roleName: roleMap[p.realRole].name,
+            team: p.team,
+            alive: p.alive,
+            ...(p.realRole === "drunk" && p.drunkAs
+              ? { believedAs: roleMap[p.drunkAs].name }
+              : {}),
+          })),
+        }
+      : {}),
+  };
+};
+const state = (s: S): AuthoritativeGameState => ({
+  phase: s.phase,
+  dayNumber: s.day,
+  publicState: makePublic(s) as unknown as JsonValue,
+  secretState: s as unknown as JsonValue,
+});
+function fail(code: string, msg: string): never {
+  throw new GameCommandError(code, msg);
+}
+const pick = <T>(arr: T[], r: () => number) =>
+  arr[Math.floor(r() * arr.length)];
+const alive = (s: S) => s.players.filter((p) => p.alive);
+const bySeatingOrder = (s: S) =>
+  s.order
+    .map((id) => s.players.find((p) => p.id === id))
+    .filter((p): p is P => Boolean(p));
+function voteOrder(s: S) {
+  if (s.voteOrder?.length) return s.voteOrder;
+  if (!s.currentNominee) return [];
+  const nomineeSeat = s.order.indexOf(s.currentNominee);
+  return s.order.slice(nomineeSeat).concat(s.order.slice(0, nomineeSeat));
+}
+function voteChoices(s: S) {
+  return (
+    s.voteChoices ??
+    Object.fromEntries(
+      Object.entries(s.votes ?? {}).map(([id, vote]) => [
+        id,
+        vote ? "yes" : "no",
+      ]),
+    )
+  );
+}
+function nextVotePlayerId(s: S) {
+  if (s.currentVoterId) return s.currentVoterId;
+  return (
+    voteOrder(s).find((id, index) => {
+      const voter = s.players.find((player) => player.id === id);
+      return Boolean(
+        index >= (s.voteCursor ?? 0) &&
+        voter &&
+        !Object.hasOwn(voteChoices(s), id) &&
+        (voter.alive || voter.ghostVote),
+      );
+    }) ?? null
+  );
+}
+function advanceVoteCursor(s: S) {
+  const order = voteOrder(s);
+  s.voteCursor ??= 0;
+  while (s.voteCursor < order.length) {
+    const id = order[s.voteCursor];
+    const voter = s.players.find((player) => player.id === id);
+    if (!voter || (!voter.alive && !voter.ghostVote)) {
+      s.voteCursor++;
+      continue;
+    }
+    s.currentVoterId = id;
+    return;
+  }
+  s.currentVoterId = null;
+}
+function settleVote(s: S, targetId: string) {
+  const target = s.players.find((player) => player.id === targetId);
+  if (!target) return;
+  const yes = Object.values(s.votes).filter(Boolean).length;
+  const threshold = Math.ceil(alive(s).length / 2);
+  s.nominationResults.push({ nomineeId: target.id, votes: yes });
+  const qualifying = s.nominationResults.filter(
+    (result) => result.votes >= threshold,
+  );
+  const highest = qualifying.reduce(
+    (max, result) => Math.max(max, result.votes),
+    0,
+  );
+  const leaders = qualifying.filter((result) => result.votes === highest);
+  s.executionBlockVotes = highest;
+  s.executionBlockTied = leaders.length > 1;
+  s.executionBlock = leaders.length === 1 ? leaders[0].nomineeId : null;
+  if (!target.alive)
+    s.notices.push(`${target.name} is already dead and cannot be executed.`);
+  else if (yes < threshold)
+    s.notices.push(
+      `${target.name} received ${yes} votes; ${threshold} are needed to get on the block.`,
+    );
+  else if (s.executionBlockTied)
+    s.notices.push(
+      `The vote is tied at ${highest}. No one is currently on the block.`,
+    );
+  else {
+    const nominee = s.players.find((player) => player.id === s.executionBlock)!;
+    s.notices.push(`${nominee.name} is on the block with ${highest} votes.`);
+  }
+  s.currentNominee = null;
+  s.nominationStage = null;
+  s.nominationEndsAt = null;
+  s.currentVoterId = null;
+  s.votes = {};
+  s.voteChoices = {};
+  s.voteOrder = [];
+  s.voteCursor = 0;
+  s.voteTurnEndsAt = null;
+  s.botVotesDecided = [];
+}
+const neighbors = (s: S, p: P): [P, P] => {
+  const ix = s.order.indexOf(p.id);
+  const find = (direction: 1 | -1) => {
+    for (let d = 1; d < s.order.length; d++) {
+      const q = s.players.find(
+        (x) =>
+          x.id ===
+          s.order[(ix + direction * d + s.order.length) % s.order.length],
+      );
+      if (q?.alive) return q;
+    }
+    return p;
+  };
+  return [find(-1), find(1)];
+};
+const eligibleEvil = (p: P) => p.team === "Minion" || p.team === "Demon";
+const apparentRole = (p: P) => (p.realRole === "drunk" ? p.role : p.realRole);
+const abilityWorks = (p: P) => p.realRole !== "drunk" && !p.poisoned;
+const registersAs = (p: P, team: Team, r: () => number) =>
+  p.realRole === "recluse"
+    ? team === "Minion" || team === "Demon"
+      ? r() < 0.5
+      : team === "Outsider"
+        ? r() >= 0.5
+        : false
+    : p.realRole === "spy"
+      ? team === "Minion"
+        ? r() >= 0.25
+        : (team === "Townsfolk" || team === "Outsider") && r() < 0.25
+      : p.team === team;
+const registersEvil = (p: P, r: () => number) =>
+  p.realRole === "recluse"
+    ? r() < 0.5
+    : p.realRole === "spy"
+      ? r() >= 0.25
+      : eligibleEvil(p);
+function removeLastInfo(info: string[], matches: (value: string) => boolean) {
+  for (let i = info.length - 1; i >= 0; i--)
+    if (matches(info[i])) {
+      info.splice(i, 1);
+      return;
+    }
+}
+const makeInfo = (s: S, p: P, kind: string, r: () => number) => {
+  const ring = s.order.map((id) => s.players.find((x) => x.id === id)!);
+  const evil = (x: P) => registersEvil(x, r);
+  if (!abilityWorks(p)) {
+    if (kind === "chef") {
+      const n = Math.floor(r() * 3);
+      return `You sense ${n} neighboring evil pair${n === 1 ? "" : "s"}.`;
+    }
+    const candidates = s.players.filter((x) => x.id !== p.id);
+    const target = pick(candidates, r),
+      other = pick(
+        candidates.filter((x) => x.id !== target.id),
+        r,
+      ),
+      team: Team =
+        kind === "washerwoman"
+          ? "Townsfolk"
+          : kind === "librarian"
+            ? "Outsider"
+            : "Minion";
+    const shown = pick(byTeam(team), r);
+    return `One of ${target.name} or ${other.name} is the ${roleMap[shown].name}.`;
+  }
+  if (
+    kind === "washerwoman" ||
+    kind === "librarian" ||
+    kind === "investigator"
+  ) {
+    const targetTeam: Team =
+      kind === "washerwoman"
+        ? "Townsfolk"
+        : kind === "librarian"
+          ? "Outsider"
+          : "Minion";
+    const possibleTargets = s.players.filter((x) => x.id !== p.id);
+    const target = possibleTargets.find((x) => registersAs(x, targetTeam, r));
+    if (!target)
+      return `${kind === "librarian" ? "No Outsiders are in play." : "No information is available."}`;
+    const decoys = possibleTargets.filter((x) => x.id !== target.id && x.alive);
+    const other = decoys.length ? pick(decoys, r) : target;
+    let shown = target.realRole;
+    if (target.realRole === "recluse") shown = pick(byTeam(targetTeam), r);
+    if (target.realRole === "spy") shown = pick(byTeam(targetTeam), r);
+    return `One of ${target.name} or ${other.name} is the ${roleMap[shown].name}.`;
+  }
+  if (kind === "chef") {
+    let n = 0;
+    for (let i = 0; i < ring.length; i++)
+      if (evil(ring[i]) && evil(ring[(i + 1) % ring.length])) n++;
+    return `You sense ${n} neighboring evil pair${n === 1 ? "" : "s"}.`;
+  }
+  return "";
+};
+function queueNight(s: S, r: () => number) {
+  const tasks: Task[] = [];
+  s.players.forEach((p) => {
+    p.poisoned = false;
+    delete p.poisonedBy;
+  });
+  s.nightDeaths = [];
+  const push = (id: string, k: string) => {
+    const p = s.players.find((x) => x.id === id);
+    if (p?.alive) tasks.push({ playerId: id, kind: k });
+  };
+  const pushRole = (id: string) =>
+    s.players.forEach((p) => {
+      if (apparentRole(p) === id) push(p.id, id);
+    });
+  if (s.firstNight && s.players.length >= 7) {
+    const minions = s.players.filter((x) => x.team === "Minion");
+    const demon = s.players.find((x) => x.team === "Demon");
+    for (const p of minions) {
+      const otherMinions = minions
+        .filter((x) => x.id !== p.id)
+        .map((x) => x.name);
+      p.info.push(
+        `The Demon is ${demon?.name ?? "unknown"}. ${otherMinions.length ? `Your fellow Minion${otherMinions.length === 1 ? "" : "s"}: ${otherMinions.join(", ")}.` : "You are the only Minion."}`,
+      );
+    }
+    for (const p of s.players)
+      if (p.realRole === "imp")
+        p.info.push(
+          `Your Minions: ${minions.map((x) => x.name).join(", ")}. Possible bluffs: ${s.demonBluffs.map((x) => roleMap[x].name).join(", ")}.`,
+        );
+  }
+  pushRole("poisoner");
+  if (!s.firstNight) pushRole("monk");
+  pushRole("spy");
+  if (s.firstNight)
+    for (const id of ["washerwoman", "librarian", "investigator", "chef"])
+      pushRole(id);
+  for (const id of s.newDemonIds ?? [])
+    if (s.players.some((p) => p.id === id && p.alive && p.realRole === "imp"))
+      tasks.push({ playerId: id, kind: "new-imp-info" });
+  if (!s.firstNight)
+    for (const p of s.players) if (p.realRole === "imp") push(p.id, "imp");
+  pushRole("empath");
+  pushRole("fortune-teller");
+  if (!s.firstNight && s.priorExecution) pushRole("undertaker");
+  pushRole("butler");
+  s.queue = tasks;
+  s.current = null;
+  advanceNight(s, r);
+}
+function checkWin(s: S) {
+  const imp = s.players.find((p) => p.team === "Demon" && p.alive);
+  if (!imp) {
+    s.winner = "Good";
+    s.phase = "finished";
+    return true;
+  }
+  if (alive(s).length <= 2) {
+    s.winner = "Evil";
+    s.phase = "finished";
+    return true;
+  }
+  return false;
+}
+function kill(
+  s: S,
+  p: P,
+  by: "demon" | "execution" | "slayer",
+  r: () => number,
+) {
+  if (!p.alive) return;
+  const aliveBefore = alive(s).length;
+  const protectedFromDemon = (target: P) =>
+    (target.realRole === "soldier" && !target.poisoned) ||
+    s.players.some(
+      (x) =>
+        x.realRole === "monk" &&
+        x.alive &&
+        s.nightPicks[x.id]?.[0] === target.id &&
+        !x.poisoned,
+    );
+  if (by === "demon" && protectedFromDemon(p)) return;
+  if (by === "demon" && p.realRole === "mayor" && !p.poisoned) {
+    const others = alive(s).filter((x) => x.id !== p.id);
+    p = pick(others, r);
+    if (protectedFromDemon(p)) return;
+  }
+  p.alive = false;
+  if (p.realRole === "poisoner") {
+    for (const target of s.players)
+      if (target.poisonedBy === p.id) {
+        target.poisoned = false;
+        delete target.poisonedBy;
+      }
+  }
+  if (by === "execution") s.priorExecution = p.id;
+  if (by === "demon") {
+    s.nightDeaths.push(p.name);
+    if (
+      p.realRole === "ravenkeeper" ||
+      (p.realRole === "drunk" && p.role === "ravenkeeper")
+    )
+      s.queue.unshift({ playerId: p.id, kind: "ravenkeeper" });
+  }
+  if (p.realRole === "saint" && by === "execution" && !p.poisoned) {
+    s.winner = "Evil";
+    s.phase = "finished";
+  }
+  if (p.realRole === "imp" && by !== "demon") {
+    const sw = s.players.find(
+      (x) => x.realRole === "scarlet-woman" && x.alive && !x.poisoned,
+    );
+    if (sw && aliveBefore >= 5) {
+      sw.realRole = "imp";
+      sw.role = "imp";
+      sw.team = "Demon";
+      s.newDemonIds ??= [];
+      s.newDemonIds.push(sw.id);
+    } else {
+      s.winner = "Good";
+      s.phase = "finished";
+    }
+  }
+  if (by !== "demon") checkWin(s);
+}
+function advanceNight(s: S, r: () => number) {
+  if (s.phase === "finished") return;
+  while (s.queue.length) {
+    const task = s.queue.shift()!;
+    const p = s.players.find((x) => x.id === task.playerId);
+    if (!p || (!p.alive && task.kind !== "ravenkeeper")) continue;
+    if (task.kind === "new-imp-info") {
+      p.info.push("You are now the Imp.");
+      s.newDemonIds = (s.newDemonIds ?? []).filter((id) => id !== p.id);
+      continue;
+    }
+    if (
+      ["washerwoman", "librarian", "investigator", "chef"].includes(task.kind)
+    ) {
+      p.info.push(makeInfo(s, p, task.kind, r));
+      continue;
+    }
+    if (task.kind === "empath") {
+      const [a, b] = neighbors(s, p);
+      const count = abilityWorks(p)
+        ? [a, b].filter((x) => registersEvil(x, r)).length
+        : Math.floor(r() * 3);
+      p.info.push(`Empath (Night ${s.day + 1}): ${count}.`);
+      continue;
+    }
+    if (task.kind === "undertaker") {
+      const executed = s.players.find((x) => x.id === s.priorExecution);
+      if (executed) {
+        let shown = executed.realRole;
+        if (!abilityWorks(p)) shown = pick(roles, r).id;
+        else if (executed.realRole === "recluse" && r() < 0.5)
+          shown = pick(byTeam("Minion").concat("imp"), r);
+        else if (executed.realRole === "spy" && r() < 0.25)
+          shown = pick(byTeam("Townsfolk").concat(byTeam("Outsider")), r);
+        p.info.push(
+          `Undertaker (Night ${s.day + 1}): the executed player was ${roleMap[shown].name}.`,
+        );
+      }
+      continue;
+    }
+    if (task.kind === "spy") {
+      if (abilityWorks(p))
+        p.info.push(
+          `Grimoire: ${s.players.map((x) => `${x.name} — ${roleMap[x.realRole].name}${x.alive ? "" : " (dead)"}${x.poisoned ? " (poisoned)" : ""}`).join("; ")}`,
+        );
+      continue;
+    }
+    s.current = task;
+    return;
+  }
+  s.current = null;
+  finishNight(s);
+}
+function finishNight(s: S) {
+  if (s.phase === "finished") return;
+  s.notices = [];
+  if (s.nightDeaths.length)
+    s.notices.push(`${s.nightDeaths.join(" and ")} died during the night.`);
+  else s.notices.push("No one died during the night.");
+  if (!checkWin(s)) {
+    s.phase = "day";
+    s.day = Math.max(1, s.day + 1);
+    s.dayStage = "discussion";
+    s.discussionEndsAt = Date.now() + 5 * 60 * 1000;
+    s.executedToday = false;
+    s.botNominationsDecided = [];
+    s.notices.push("The town gathers. Discussion begins.");
+  }
+  s.firstNight = false;
+  s.priorExecution = null;
+  s.current = null;
+  s.attackResolved = false;
+}
+function startNight(s: S, r: () => number) {
+  if (s.phase === "finished") return;
+  if (
+    !s.executedToday &&
+    alive(s).length === 3 &&
+    s.players.some((p) => p.realRole === "mayor" && p.alive && !p.poisoned)
+  ) {
+    s.winner = "Good";
+    s.phase = "finished";
+    s.notices.push("The Mayor's ability ends the game. Good wins.");
+    return;
+  }
+  s.phase = "night";
+  s.dayStage = null;
+  s.nominationStage = null;
+  s.nominationEndsAt = null;
+  s.discussionEndsAt = null;
+  s.nominations = [];
+  s.nominationResults = [];
+  s.executionBlock = null;
+  s.executionBlockVotes = 0;
+  s.executionBlockTied = false;
+  s.nominatedBy = [];
+  s.botNominationsDecided = [];
+  s.botVotesDecided = [];
+  s.votes = {};
+  s.voteChoices = {};
+  s.voteOrder = [];
+  s.voteCursor = 0;
+  s.currentVoterId = null;
+  s.currentNominee = null;
+  s.voteTurnEndsAt = null;
+  s.nightPicks = {};
+  s.attackResolved = false;
+  queueNight(s, r);
+}
+function project(s: S, id: string): PlayerPrivateView | null {
+  const p = s.players.find((x) => x.id === id);
+  if (!p) return null;
+  const role = roleMap[p.role];
+  const currentVoterId = nextVotePlayerId(s);
+  const voteSeatIndex = voteOrder(s).indexOf(id);
+  const voteCursor =
+    s.voteCursor ??
+    (currentVoterId
+      ? voteOrder(s).indexOf(currentVoterId)
+      : voteOrder(s).length);
+  const canStillVote = voteSeatIndex >= voteCursor;
+  const voteChoice = voteChoices(s)[id];
+  const info = [...p.info];
+  if (!p.alive && s.phase === "night") {
+    const executed = s.players.find((x) => x.id === s.priorExecution);
+    if (p.realRole === "undertaker" && executed) {
+      const prefix = `Undertaker: the executed player was ${roleMap[executed.realRole].name}.`;
+      removeLastInfo(
+        info,
+        (value) =>
+          value === prefix ||
+          value.startsWith(`Undertaker (Night ${s.day + 1}):`),
+      );
+    }
+    if (p.realRole === "empath")
+      removeLastInfo(
+        info,
+        (value) =>
+          /^Empath: \d+\.$/.test(value) ||
+          value.startsWith(`Empath (Night ${s.day + 1}):`),
+      );
+    if (p.realRole === "fortune-teller")
+      removeLastInfo(info, (value) =>
+        value.startsWith(`Fortune Teller (Night ${s.day + 1}):`),
+      );
+  }
+  if (!p.alive && s.phase === "day") {
+    const notices = s.notices ?? [];
+    const latestDawn = notices.reduce(
+      (found, value, index) =>
+        value.includes("died during the night.") ? index : found,
+      -1,
+    );
+    const latestDayStart = notices.reduce(
+      (found, value, index) =>
+        value.includes("Discussion begins.") ? index : found,
+      -1,
+    );
+    const diedThisNight =
+      (s.nightDeaths ?? []).includes(p.name) ||
+      (latestDawn > latestDayStart && notices[latestDawn].includes(p.name));
+    if (diedThisNight) {
+      let executedPlayer: P | undefined;
+      for (let i = latestDayStart + 1; i < latestDawn; i++)
+        executedPlayer =
+          s.players.find((candidate) =>
+            notices[i].includes(`${candidate.name} is executed.`),
+          ) ?? executedPlayer;
+      if (p.realRole === "undertaker" && executedPlayer)
+        removeLastInfo(
+          info,
+          (value) =>
+            value ===
+              `Undertaker: the executed player was ${roleMap[executedPlayer!.realRole].name}.` ||
+            value.startsWith(`Undertaker (Night ${s.day}):`),
+        );
+      if (p.realRole === "empath")
+        removeLastInfo(
+          info,
+          (value) =>
+            /^Empath: \d+\.$/.test(value) ||
+            value.startsWith(`Empath (Night ${s.day}):`),
+        );
+      if (p.realRole === "fortune-teller")
+        removeLastInfo(info, (value) =>
+          value.startsWith(`Fortune Teller (Night ${s.day}):`),
+        );
+    }
+  }
+  const actions: PlayerPrivateView["actions"] = [];
+  let prompt: string | null = null;
+  const add = (label: string, command: GameCommand) =>
+    actions.push({
+      id: `${String(command.type)}-${JSON.stringify(command)}`,
+      label,
+      command,
+    });
+  if (s.phase === "night" && s.current?.playerId === id) {
+    const k = s.current.kind;
+    prompt = `Night action: ${k.replaceAll("-", " ")}.`;
+    const targets = s.players.filter(
+      (x) => x.id !== id || ["imp", "ravenkeeper", "poisoner"].includes(k),
+    );
+    if (["poisoner", "monk", "imp", "butler", "ravenkeeper"].includes(k))
+      for (const t of targets)
+        add(
+          `${k === "imp" ? "Choose to kill " : k === "monk" ? "Protect " : k === "poisoner" ? "Poison " : k === "butler" ? "Choose master " : "Learn about "}${t.name}`,
+          { type: "NIGHT_CHOOSE", targetPlayerId: t.id },
+        );
+    if (k === "fortune-teller")
+      for (const a of s.players)
+        for (const b of s.players)
+          if (a.id !== b.id)
+            add(`Check ${a.name} + ${b.name}`, {
+              type: "NIGHT_CHOOSE",
+              targetPlayerId: a.id,
+              secondTargetPlayerId: b.id,
+            });
+  }
+  if (s.phase === "day" && p.alive) {
+    if (p.role === "slayer" && !p.onceUsed)
+      for (const t of s.players)
+        add(`Slay ${t.name}`, { type: "SLAYER_SHOT", targetPlayerId: t.id });
+    if (
+      !s.currentNominee &&
+      !s.executedToday &&
+      (s.dayStage ?? "nominations") === "nominations"
+    )
+      for (const t of s.players.filter((x) => !s.nominations.includes(x.id)))
+        add(`Nominate ${t.name}${t.alive ? "" : " (dead)"}`, {
+          type: "NOMINATE",
+          nomineeId: t.id,
+        });
+  }
+  if (
+    s.phase === "day" &&
+    s.currentNominee &&
+    ((s.nominationStage ?? "voting") === "countdown" ||
+      (s.nominationStage ?? "voting") === "voting") &&
+    canStillVote &&
+    (p.alive || p.ghostVote)
+  ) {
+    const masterId = s.nightPicks[p.id]?.[0];
+    const canVoteYes =
+      p.realRole !== "butler" ||
+      !p.alive ||
+      p.poisoned ||
+      (masterId !== undefined && s.votes[masterId] === true);
+    if (voteChoice === "yes")
+      add("Lower hand", {
+        type: "VOTE",
+        vote: false,
+        nomineeId: s.currentNominee,
+      });
+    else if (canVoteYes)
+      add(p.alive ? "Raise hand to vote yes" : "Use ghost vote: yes", {
+        type: "VOTE",
+        vote: true,
+        nomineeId: s.currentNominee,
+      });
+    if (p.isBot)
+      add("Keep hand down (no)", {
+        type: "VOTE",
+        vote: false,
+        nomineeId: s.currentNominee,
+      });
+  }
+  if (s.phase === "day" && p.isHost) {
+    if (!s.currentNominee && s.dayStage === "discussion")
+      add("Start nominations early", { type: "OPEN_NOMINATIONS" });
+    else if (
+      s.currentNominee &&
+      (s.nominationStage === "accusation" || s.nominationStage === "defense")
+    )
+      add(
+        s.nominationStage === "accusation"
+          ? "End accusation early"
+          : "End defence early",
+        {
+          type: "ADVANCE_NOMINATION",
+          nomineeId: s.currentNominee,
+          stage: s.nominationStage,
+          early: true,
+        },
+      );
+    else if (!s.currentNominee && s.dayStage === "nominations")
+      add("Close nominations and begin night", { type: "CLOSE_NOMINATIONS" });
+  }
+  if (
+    s.phase === "day" &&
+    s.currentNominee &&
+    (s.nominationStage ?? "voting") !== "voting"
+  ) {
+    prompt =
+      s.nominationStage === "accusation"
+        ? `${s.players.find((x) => x.id === s.nominationCursor)?.name ?? "The nominator"} has one minute to make their accusation.`
+        : s.nominationStage === "defense"
+          ? `${s.players.find((x) => x.id === s.currentNominee)?.name ?? "The nominee"} has one minute to defend.`
+          : `Voting starts in five seconds. You may raise your hand now; it stays changeable until your seat is passed in the clockwise sweep.`;
+  }
+  if (
+    s.phase === "day" &&
+    s.currentNominee &&
+    (s.nominationStage ?? "voting") === "voting"
+  ) {
+    const currentVoter = s.players.find((x) => x.id === currentVoterId);
+    if (!p.alive && !p.ghostVote)
+      prompt = "You have no ghost vote remaining, so your seat is skipped.";
+    else if (voteSeatIndex < voteCursor)
+      prompt = `Your seat has been passed. Your vote is final.`;
+    else if (voteChoice === "yes")
+      prompt =
+        currentVoterId === id
+          ? "Your hand is raised. The Storyteller is counting your seat now."
+          : "Your hand is raised. You can lower it until the Storyteller passes your seat.";
+    else if (currentVoterId === id)
+      prompt =
+        p.realRole === "butler" &&
+        !p.poisoned &&
+        s.nightPicks[p.id]?.[0] &&
+        s.votes[s.nightPicks[p.id]![0]] !== true
+          ? "Your seat is being counted. Keep your hand down for no; raise it only if your Master has their hand raised or has already voted yes."
+          : "Your seat is being counted. Raise your hand to vote yes; if it stays down when the Storyteller passes, it counts as no.";
+    else
+      prompt = `You may raise your hand early or wait. You can lower it until your seat is passed. No button is needed for a no vote. Voting proceeds clockwise, starting with the nominee; ${currentVoter?.name ?? "the next player"} is being counted now.`;
+  } else if (s.phase === "day" && p.alive) {
+    prompt =
+      s.dayStage === "discussion"
+        ? "Discussion time is open. Nominations begin when the timer ends, or the host can open them early."
+        : s.executedToday
+          ? "An execution has ended the day. Night is beginning."
+          : s.nominatedBy.includes(id)
+            ? "You have used your nomination for today. Wait for another player to nominate."
+            : s.executionBlock
+              ? `${s.players.find((x) => x.id === s.executionBlock)?.name} is on the block with ${s.executionBlockVotes} votes. Nominations continue; a later nominee needs more votes to replace them.`
+              : s.executionBlockTied
+                ? "The leading nomination votes are tied, so nobody is on the block. Nominations continue."
+                : "Choose a player to nominate. The top vote getter is executed when nominations close.";
+  }
+  return {
+    role: {
+      id: p.role,
+      name: role.name,
+      team: role.team,
+      ability: role.ability,
+    },
+    information: [...new Set(info)],
+    prompt,
+    actions,
+  };
+}
+export const troubleBrewing: GameRuleset = {
+  id: "trouble-brewing",
+  version: "1.0.0",
+  minPlayers: 5,
+  maxPlayers: 15,
+  createInitialState(participants, random) {
+    const n = participants.length,
+      setup = counts[n];
+    if (!setup) throw new Error("Trouble Brewing supports 5–15 players.");
+    let [nt, no] = setup;
+    const [, , nm] = setup;
+    const chosen: string[] = [];
+    for (let i = 0; i < nm; i++)
+      chosen.push(
+        pick(
+          byTeam("Minion").filter((x) => !chosen.includes(x)),
+          random,
+        ),
+      );
+    chosen.push("imp");
+    if (chosen.includes("baron")) {
+      no += 2;
+      nt -= 2;
+    }
+    for (let i = 0; i < nt; i++)
+      chosen.push(
+        pick(
+          byTeam("Townsfolk").filter((x) => !chosen.includes(x)),
+          random,
+        ),
+      );
+    for (let i = 0; i < no; i++)
+      chosen.push(
+        pick(
+          byTeam("Outsider").filter((x) => !chosen.includes(x)),
+          random,
+        ),
+      );
+    if (chosen.length < n) chosen.push("drunk");
+    const assigned = shuffle(chosen, random);
+    const players = participants.map((u, i) => {
+      const realRole = assigned[i];
+      let role = realRole,
+        drunkAs: string | undefined;
+      if (realRole === "drunk") {
+        drunkAs = pick(byTeam("Townsfolk"), random);
+        role = drunkAs;
+      }
+      const definition = roleMap[realRole];
+      return {
+        id: u.id,
+        name: u.displayName,
+        isHost: u.isHost,
+        isBot: u.isBot === true,
+        alive: true,
+        role,
+        realRole,
+        team: definition.team,
+        drunkAs,
+        poisoned: false,
+        onceUsed: false,
+        ghostVote: true,
+        info: [],
+        redHerring: false,
+      } as P;
+    });
+    const goodPlayers = players.filter(
+      (x) => x.team === "Townsfolk" || x.team === "Outsider",
+    );
+    const redHerring = goodPlayers.length
+      ? pick(goodPlayers, random)
+      : undefined;
+    if (redHerring) redHerring.redHerring = true;
+    const s: S = {
+      players,
+      order: shuffle(
+        players.map((x) => x.id),
+        random,
+      ),
+      day: 0,
+      phase: "night",
+      dayStage: null,
+      nominationStage: null,
+      nominationEndsAt: null,
+      discussionEndsAt: null,
+      voteTurnEndsAt: null,
+      firstNight: true,
+      queue: [],
+      current: null,
+      attackResolved: false,
+      nightDeaths: [],
+      newDemonIds: [],
+      nightPicks: {},
+      priorExecution: null,
+      executedToday: false,
+      nominations: [],
+      nominationResults: [],
+      executionBlock: null,
+      executionBlockVotes: 0,
+      executionBlockTied: false,
+      nominatedBy: [],
+      botNominationsDecided: [],
+      botVotesDecided: [],
+      votes: {},
+      voteChoices: {},
+      voteOrder: [],
+      voteCursor: 0,
+      currentVoterId: null,
+      currentNominee: null,
+      nominationCursor: null,
+      nominationUsed: false,
+      virginSpent: false,
+      notices: [],
+      winner: null,
+      demonBluffs: shuffle(
+        byTeam("Townsfolk").filter(
+          (x) => !players.some((p) => p.realRole === x),
+        ),
+        random,
+      ).slice(0, 3),
+    };
+    queueNight(s, random);
+    return state(s);
+  },
+  applyCommand(current, actor, command, random): GameTransition {
+    const s = JSON.parse(JSON.stringify(current.secretState)) as S;
+    s.nominationStage ??= s.currentNominee ? "voting" : null;
+    s.nominationEndsAt ??= null;
+    s.attackResolved ??= false;
+    s.nightDeaths ??= [];
+    s.newDemonIds ??= [];
+    s.nominationResults ??= [];
+    s.executionBlock ??= null;
+    s.executionBlockVotes ??= 0;
+    s.executionBlockTied ??= false;
+    if (!s.voteChoices)
+      s.voteChoices = Object.fromEntries(
+        Object.entries(s.votes ?? {}).map(([id, vote]) => [
+          id,
+          vote ? "yes" : "no",
+        ]),
+      );
+    s.voteOrder ??= [];
+    s.voteCursor ??= 0;
+    s.currentVoterId ??= null;
+    if (s.currentNominee && !s.voteOrder.length) {
+      const nomineeSeat = s.order.indexOf(s.currentNominee);
+      s.voteOrder = s.order
+        .slice(nomineeSeat)
+        .concat(s.order.slice(0, nomineeSeat));
+    }
+    if (s.currentNominee && s.nominationStage === "voting" && !s.currentVoterId)
+      advanceVoteCursor(s);
+    s.botNominationsDecided ??= [];
+    s.botVotesDecided ??= [];
+    if (
+      s.currentNominee &&
+      s.nominationStage === "voting" &&
+      s.voteTurnEndsAt == null
+    )
+      s.voteTurnEndsAt = Date.now() - 1;
+    const p = s.players.find((x) => x.id === actor.id);
+    if (!p) fail("NOT_PLAYER", "You are not in this game.");
+    if (command.type === "NIGHT_CHOOSE") {
+      if (s.phase !== "night" || s.current?.playerId !== p.id)
+        fail("NOT_YOUR_TURN", "There is no night action waiting for you.");
+      const task = s.current;
+      const target = s.players.find((x) => x.id === command.targetPlayerId);
+      if (!target) fail("BAD_TARGET", "That player is not in this game.");
+      const k = task.kind;
+      if ((k === "monk" || k === "butler") && target.id === p.id)
+        fail("BAD_TARGET", "Choose another player.");
+      if (k === "fortune-teller") {
+        const second = s.players.find(
+          (x) => x.id === command.secondTargetPlayerId,
+        );
+        if (!second || second.id === target.id)
+          fail("BAD_TARGET", "Choose two different players.");
+        let yes = [target, second].some(
+          (x) =>
+            x.realRole === "imp" ||
+            x.redHerring ||
+            (x.realRole === "recluse" && random() < 0.5),
+        );
+        if (!abilityWorks(p)) yes = random() < 0.5;
+        p.info.push(
+          `Fortune Teller (Night ${s.day + 1}): ${yes ? "yes" : "no"}.`,
+        );
+      } else if (k === "ravenkeeper") {
+        let revealedRole = target.realRole;
+        if (!abilityWorks(p)) revealedRole = pick(roles, random).id;
+        else if (target.realRole === "recluse" && random() < 0.5)
+          revealedRole = pick(byTeam("Minion").concat("imp"), random);
+        else if (target.realRole === "spy" && random() < 0.25)
+          revealedRole = pick(
+            byTeam("Townsfolk").concat(byTeam("Outsider")),
+            random,
+          );
+        p.info.push(
+          `Ravenkeeper: ${target.name} is ${roleMap[revealedRole].name}.`,
+        );
+      } else if (k === "poisoner") {
+        for (const previous of s.players)
+          if (previous.poisonedBy === p.id) {
+            previous.poisoned = false;
+            delete previous.poisonedBy;
+          }
+        const poisonWorks = abilityWorks(p);
+        if (poisonWorks) {
+          target.poisoned = true;
+          target.poisonedBy = p.id;
+        }
+        s.nightPicks[p.id] = [target.id];
+      } else if (k === "imp") {
+        s.nightPicks[p.id] = [target.id];
+        if (abilityWorks(p)) {
+          if (target.id === p.id) {
+            const sw = s.players.find(
+              (x) => x.realRole === "scarlet-woman" && x.alive && !x.poisoned,
+            );
+            const next =
+              alive(s).length >= 5 && sw
+                ? sw
+                : s.players.find((x) => x.team === "Minion" && x.alive);
+            p.alive = false;
+            s.nightDeaths.push(p.name);
+            if (next) {
+              next.realRole = "imp";
+              next.role = "imp";
+              next.team = "Demon";
+              s.newDemonIds.push(next.id);
+              s.queue.unshift({ playerId: next.id, kind: "new-imp-info" });
+            } else {
+              s.winner = "Good";
+              s.phase = "finished";
+              s.notices.push(`${p.name} died during the night.`);
+            }
+          } else kill(s, target, "demon", random);
+        }
+      } else {
+        s.nightPicks[p.id] = [target.id];
+      }
+      advanceNight(s, random);
+      return {
+        state: state(s),
+        eventType: "night_action",
+        eventPayload: { kind: k, actorId: p.id },
+      };
+    }
+    if (command.type === "OPEN_NOMINATIONS") {
+      if (s.phase !== "day" || s.currentNominee || s.dayStage !== "discussion")
+        fail("INVALID_PHASE", "Nominations cannot be opened right now.");
+      const deadline = s.discussionEndsAt ?? 0;
+      if (!actor.isHost && Date.now() < deadline)
+        fail(
+          "HOST_REQUIRED",
+          "Only the host can start nominations before the discussion timer ends.",
+        );
+      s.dayStage = "nominations";
+      s.discussionEndsAt = null;
+      s.notices.push("The discussion timer ends. Nominations are now open.");
+      return {
+        state: state(s),
+        eventType: "nominations_opened",
+        eventPayload: { day: s.day },
+      };
+    }
+    if (command.type === "BOT_SKIP_NOMINATION") {
+      if (
+        !actor.isBot ||
+        !p.isBot ||
+        !p.alive ||
+        s.phase !== "day" ||
+        s.currentNominee ||
+        (s.dayStage ?? "nominations") !== "nominations" ||
+        s.botNominationsDecided.includes(p.id) ||
+        s.nominatedBy.includes(p.id)
+      )
+        fail("INVALID_BOT_ACTION", "This bot cannot pass on a nomination now.");
+      s.botNominationsDecided.push(p.id);
+      s.notices.push(`${p.name} decided not to nominate today.`);
+      return {
+        state: state(s),
+        eventType: "bot_nomination_passed",
+        eventPayload: { botId: p.id },
+      };
+    }
+    if (command.type === "NOMINATE") {
+      if (
+        s.phase !== "day" ||
+        !p.alive ||
+        s.executedToday ||
+        s.currentNominee ||
+        (s.dayStage ?? "nominations") !== "nominations"
+      )
+        fail("INVALID_PHASE", "Nominations are not open right now.");
+      const target = s.players.find((x) => x.id === command.nomineeId);
+      if (
+        !target ||
+        s.nominatedBy.includes(p.id) ||
+        s.nominations.includes(target.id)
+      )
+        fail("INVALID_NOMINATION", "That nomination is not allowed.");
+      s.nominatedBy.push(p.id);
+      if (p.isBot && !s.botNominationsDecided.includes(p.id))
+        s.botNominationsDecided.push(p.id);
+      s.nominations.push(target.id);
+      s.currentNominee = target.id;
+      s.nominationStage = "accusation";
+      s.nominationEndsAt = Date.now() + 60_000;
+      s.voteTurnEndsAt = null;
+      s.currentVoterId = null;
+      s.botVotesDecided = [];
+      s.nominationCursor = p.id;
+      s.votes = {};
+      s.voteChoices = {};
+      const nomineeSeat = s.order.indexOf(target.id);
+      s.voteOrder = s.order
+        .slice(nomineeSeat)
+        .concat(s.order.slice(0, nomineeSeat));
+      s.voteCursor = 0;
+      s.notices.push(
+        `${p.name} nominated ${target.name}${target.alive ? "" : " (dead)"}.`,
+      );
+      const virgin = s.players.find(
+        (x) => x.id === target.id && x.realRole === "virgin",
+      );
+      if (virgin?.alive && !s.virginSpent) {
+        s.virginSpent = true;
+        const nominee = p;
+        if (nominee.team === "Townsfolk" && abilityWorks(virgin)) {
+          s.executedToday = true;
+          kill(s, nominee, "execution", random);
+          s.currentNominee = null;
+          s.currentVoterId = null;
+          s.voteOrder = [];
+          s.voteCursor = 0;
+          s.nominationStage = null;
+          s.nominationEndsAt = null;
+          s.voteTurnEndsAt = null;
+          s.notices.push(
+            `${nominee.name} was executed immediately after nominating ${target.name}, the Virgin.`,
+          );
+          checkWin(s);
+          if (!s.winner) startNight(s, random);
+        }
+      }
+      return {
+        state: state(s),
+        eventType: "nomination",
+        eventPayload: { nomineeId: target.id, by: p.id },
+      };
+    }
+    if (command.type === "ADVANCE_NOMINATION") {
+      if (s.phase !== "day" || !s.currentNominee || !s.nominationStage)
+        fail("INVALID_PHASE", "There is no nomination discussion to advance.");
+      if (
+        command.nomineeId !== s.currentNominee ||
+        command.stage !== s.nominationStage
+      )
+        fail(
+          "NOMINATION_STAGE_CHANGED",
+          "This nomination stage has already changed.",
+        );
+      const early = command.early === true;
+      if (early && (!actor.isHost || s.nominationStage === "countdown"))
+        fail(
+          "HOST_REQUIRED",
+          "Only the host can end the accusation or defence early.",
+        );
+      if (!early && Date.now() < (s.nominationEndsAt ?? 0))
+        fail(
+          "NOMINATION_TIMER_ACTIVE",
+          "This speaking or countdown timer is still running.",
+        );
+      if (s.nominationStage === "accusation") {
+        s.nominationStage = "defense";
+        s.nominationEndsAt = Date.now() + 60_000;
+      } else if (s.nominationStage === "defense") {
+        s.nominationStage = "countdown";
+        s.nominationEndsAt = Date.now() + 5_000;
+      } else if (s.nominationStage === "countdown") {
+        s.nominationStage = "voting";
+        s.nominationEndsAt = null;
+        s.voteCursor = 0;
+        advanceVoteCursor(s);
+        s.voteTurnEndsAt = Date.now() + 3_000;
+      }
+      return {
+        state: state(s),
+        eventType: "nomination_stage_advanced",
+        eventPayload: { nomineeId: s.currentNominee, stage: s.nominationStage },
+      };
+    }
+    if (command.type === "VOTE") {
+      const voterIndex = s.voteOrder.indexOf(p.id);
+      if (
+        s.phase !== "day" ||
+        !s.currentNominee ||
+        (s.nominationStage !== "voting" && s.nominationStage !== "countdown") ||
+        voterIndex < s.voteCursor ||
+        (!p.alive && !p.ghostVote)
+      )
+        fail(
+          "INVALID_VOTE",
+          "Your seat has already been passed, or you are not eligible to vote.",
+        );
+      if (command.vote !== true && command.vote !== false)
+        fail("INVALID_VOTE", "Raise or lower your hand to vote.");
+      if (
+        typeof command.nomineeId === "string" &&
+        command.nomineeId !== s.currentNominee
+      )
+        fail("VOTE_CHANGED", "That nomination has already moved on.");
+      const masterId = s.nightPicks[p.id]?.[0];
+      if (
+        command.vote === true &&
+        p.realRole === "butler" &&
+        p.alive &&
+        !p.poisoned &&
+        (!masterId || s.votes[masterId] !== true)
+      )
+        fail(
+          "BUTLER_VOTE",
+          "You may raise your hand only when your Master has their hand raised or has already voted yes.",
+        );
+      if (command.vote) {
+        s.voteChoices[p.id] = "yes";
+        s.votes[p.id] = true;
+      } else {
+        delete s.voteChoices[p.id];
+        delete s.votes[p.id];
+      }
+      if (p.isBot) {
+        s.botVotesDecided ??= [];
+        if (!s.botVotesDecided.includes(p.id)) s.botVotesDecided.push(p.id);
+      }
+      return {
+        state: state(s),
+        eventType: "vote",
+        eventPayload: { actorId: p.id, raised: command.vote },
+      };
+    }
+    if (command.type === "ADVANCE_VOTE") {
+      if (s.phase !== "day" || !s.currentNominee || !s.currentVoterId)
+        fail("INVALID_PHASE", "There is no active vote seat to pass.");
+      if (
+        typeof command.nomineeId === "string" &&
+        command.nomineeId !== s.currentNominee
+      )
+        fail("VOTE_CHANGED", "That nomination has already moved on.");
+      if (
+        typeof command.playerId === "string" &&
+        command.playerId !== s.currentVoterId
+      )
+        fail("VOTE_SEAT_PASSED", "That vote seat has already been passed.");
+      if (s.nominationStage !== "voting")
+        fail(
+          "VOTE_TIMER_ACTIVE",
+          "The nomination discussion and countdown must finish before voting.",
+        );
+      if (Date.now() < (s.voteTurnEndsAt ?? 0))
+        fail("VOTE_TIMER_ACTIVE", "The current seat is still being counted.");
+      const passedId = s.currentVoterId;
+      const passed = s.players.find((player) => player.id === passedId);
+      if (passed?.alive === false && passed.ghostVote && s.votes[passedId])
+        passed.ghostVote = false;
+      const wasRaised = Boolean(s.votes[passedId]);
+      s.voteCursor++;
+      advanceVoteCursor(s);
+      if (!s.currentVoterId) settleVote(s, s.currentNominee);
+      else s.voteTurnEndsAt = Date.now() + 3000;
+      return {
+        state: state(s),
+        eventType: "vote_seat_passed",
+        eventPayload: { playerId: passedId, raised: wasRaised },
+      };
+    }
+    if (command.type === "SLAYER_SHOT") {
+      if (s.phase !== "day" || !p.alive || p.role !== "slayer" || p.onceUsed)
+        fail("SLAYER_UNAVAILABLE", "Your Slayer ability is unavailable.");
+      const target = s.players.find((x) => x.id === command.targetPlayerId);
+      if (!target) fail("BAD_TARGET", "That player is not in this game.");
+      p.onceUsed = true;
+      const slayWorks = abilityWorks(p);
+      const isDemon =
+        target.alive &&
+        ((target.team === "Demon" && target.realRole === "imp") ||
+          (target.realRole === "recluse" && random() < 0.5));
+      if (slayWorks && isDemon) kill(s, target, "slayer", random);
+      s.notices.push(
+        `${p.name} used the Slayer ability on ${target.name}${slayWorks && isDemon ? " and they died" : ""}.`,
+      );
+      checkWin(s);
+      return {
+        state: state(s),
+        eventType: "slayer_shot",
+        eventPayload: { actorId: p.id },
+      };
+    }
+    if (command.type === "CLOSE_NOMINATIONS") {
+      if (
+        !actor.isHost ||
+        s.phase !== "day" ||
+        s.currentNominee ||
+        (s.dayStage ?? "nominations") !== "nominations"
+      )
+        fail(
+          "NOT_ALLOWED",
+          "Only the room creator can close nominations after they have opened.",
+        );
+      if (s.executionBlock) {
+        const target = s.players.find((x) => x.id === s.executionBlock)!;
+        if (target.alive) {
+          s.executedToday = true;
+          kill(s, target, "execution", random);
+          s.notices.push(
+            `${target.name} is executed with ${s.executionBlockVotes} votes.`,
+          );
+          checkWin(s);
+        } else
+          s.notices.push(
+            `${target.name} was on the block but is already dead; no execution occurs.`,
+          );
+      } else
+        s.notices.push(
+          s.executionBlockTied
+            ? "No execution occurs because the leading vote was tied."
+            : "No execution occurs today.",
+        );
+      if (!s.winner) startNight(s, random);
+      return {
+        state: state(s),
+        eventType: s.executedToday ? "execution" : "night_started",
+        eventPayload: {
+          day: s.day,
+          executed: s.executedToday,
+        } as unknown as JsonValue,
+      };
+    }
+    fail("UNKNOWN_COMMAND", "That game action is not supported.");
+  },
+  projectPublicState(secret) {
+    return makePublic(
+      JSON.parse(JSON.stringify(secret)) as S,
+    ) as unknown as JsonValue;
+  },
+  projectPrivateState(secret, id) {
+    return project(JSON.parse(JSON.stringify(secret)) as S, id);
+  },
 };

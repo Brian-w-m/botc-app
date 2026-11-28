@@ -3,9 +3,16 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Nightfall — Digital Storyteller",
-  description: "A private, phone-first companion for tabletop social deduction games."
+  description:
+    "A private, phone-first companion for tabletop social deduction games.",
 };
 
-export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="en"><body suppressHydrationWarning>{children}</body></html>;
+export default function RootLayout({
+  children,
+}: Readonly<{ children: React.ReactNode }>) {
+  return (
+    <html lang="en">
+      <body suppressHydrationWarning>{children}</body>
+    </html>
+  );
 }

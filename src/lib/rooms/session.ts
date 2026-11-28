@@ -5,7 +5,9 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 export function createPlayerSession() {
   const token = randomBytes(32).toString("base64url");
   const tokenHash = createHash("sha256").update(token).digest("hex");
-  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+  const expiresAt = new Date(
+    Date.now() + 7 * 24 * 60 * 60 * 1000,
+  ).toISOString();
   return { token, tokenHash, expiresAt };
 }
 
@@ -19,7 +21,7 @@ export function getPlayerSessionHash(request: Request) {
 export async function findRoomPlayer(
   supabase: SupabaseClient,
   roomId: string,
-  sessionHash: string
+  sessionHash: string,
 ) {
   return supabase
     .from("players")
@@ -31,16 +33,19 @@ export async function findRoomPlayer(
     .maybeSingle();
 }
 
-export function logSupabaseError(action: string, error: {
-  code?: string;
-  message: string;
-  details?: string | null;
-  hint?: string | null;
-}) {
+export function logSupabaseError(
+  action: string,
+  error: {
+    code?: string;
+    message: string;
+    details?: string | null;
+    hint?: string | null;
+  },
+) {
   console.error(action, {
     code: error.code,
     message: error.message,
     details: error.details,
-    hint: error.hint
+    hint: error.hint,
   });
 }
