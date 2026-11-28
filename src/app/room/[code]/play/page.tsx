@@ -106,9 +106,7 @@ export default function PlayPage({
         return latest;
       } catch (cause) {
         setError(
-          cause instanceof Error
-            ? cause.message
-            : "Unable to refresh the game.",
+          cause instanceof Error ? cause.message : "Unable to refresh the game",
         );
         return null;
       } finally {
